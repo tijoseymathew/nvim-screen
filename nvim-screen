@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+# nvim-screen - GNU screen-style session management for Neovim
+# https://github.com/tijoseymathew/nvim-screen
+
+set -euo pipefail
+
+VERSION="0.1.0"
+
+# Determine session directory
+get_session_dir() {
+    local user="${USER:-$(whoami)}"
+    local session_dir="${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-${user}"
+    echo "$session_dir"
+}
+
+# Initialize session directory
+init_session_dir() {
+    local session_dir
+    session_dir=$(get_session_dir)
+    if [[ ! -d "$session_dir" ]]; then
+        mkdir -p "$session_dir"
+        chmod 700 "$session_dir"
+    fi
+    echo "$session_dir"
+}
+
+# Get socket path for a session name
+get_socket_path() {
+    local name="$1"
+    local session_dir
+    session_dir=$(get_session_dir)
+    echo "${session_dir}/${name}.sock"
+}
+
+# Check if a socket is active (has nvim listening)
+is_socket_active() {
+    local socket="$1"
+    if [[ ! -S "$socket" ]]; then
+        return 1
+    fi
+
+    # Check if nvim is actually listening on this socket
+    if command -v lsof &>/dev/null; then
+        lsof -U -a -c nvim "$socket" &>/dev/null
+    else
+        # Fallback: try to connect
+        # If nvim --server responds, socket is active
+        timeout 0.1 nvim --server "$socket" --remote-expr "1" &>/dev/null
+    fi
+}
+
+# Clean up dead sockets
+cleanup_dead_sockets() {
+    local session_dir
+    session_dir=$(get_session_dir)
+    if [[ ! -d "$session_dir" ]]; then
+        return
+    fi
+
+    for socket in "$session_dir"/*.sock; do
+        if [[ -e "$socket" ]] && ! is_socket_active "$socket"; then
+            rm -f "$socket"
+        fi
+    done
+}
+
+# Generate session name from current directory
+generate_session_name() {
+    local dirname
+    dirname=$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | tr -c '[:alnum:]-' '_')
+    echo "$dirname"
+}
+
+# List all sessions
+list_sessions() {
+    local session_dir
+    session_dir=$(get_session_dir)
+
+    cleanup_dead_sockets
+
+    if [[ ! -d "$session_dir" ]] || ! compgen -G "$session_dir/*.sock" &>/dev/null; then
+        echo "No sessions."
+        return
+    fi
+
+    echo "There are screens on:"
+    for socket in "$session_dir"/*.sock; do
+        if [[ ! -e "$socket" ]]; then
+            continue
+        fi
+
+        local name
+        name=$(basename "$socket" .sock)
+        local status="Detached"
+
+        # Check if there are attached clients
+        if is_socket_active "$socket"; then
+            # Try to determine if clients are attached
+            # For now, we'll show as Attached if socket is active
+            status="Attached"
+        fi
+
+        # Get socket timestamp
+        local timestamp
+        timestamp=$(date -r "$socket" '+%m/%d/%y %H:%M:%S')
+
+        printf "\t%s\t(%s)\t(%s)\n" "$name" "$timestamp" "$status"
+    done
+}
+
+# Create new session
+create_session() {
+    local name="$1"
+    local socket
+    socket=$(get_socket_path "$name")
+
+    init_session_dir >/dev/null
+
+    # Check if session already exists
+    if is_socket_active "$socket"; then
+        echo "There is a screen on:" >&2
+        printf "\t%s\t(Attached)\n" "$name" >&2
+        echo "There is no screen to be created matching $name." >&2
+        exit 1
+    fi
+
+    # Remove stale socket if exists
+    rm -f "$socket"
+
+    # Start nvim with listener
+    exec nvim --listen "$socket"
+}
+
+# Attach to existing session
+attach_session() {
+    local name="$1"
+    local socket
+    socket=$(get_socket_path "$name")
+
+    if ! is_socket_active "$socket"; then
+        echo "There is no screen to be resumed matching $name." >&2
+        exit 1
+    fi
+
+    # Attach using remote-ui
+    exec nvim --remote-ui --server "$socket"
+}
+
+# Attach or create session
+attach_or_create() {
+    local name="$1"
+    local socket
+    socket=$(get_socket_path "$name")
+
+    if is_socket_active "$socket"; then
+        attach_session "$name"
+    else
+        create_session "$name"
+    fi
+}
+
+# Detach clients from a session
+detach_session() {
+    local name="$1"
+    local socket
+    socket=$(get_socket_path "$name")
+
+    if ! is_socket_active "$socket"; then
+        echo "There is no screen to be detached matching $name." >&2
+        exit 1
+    fi
+
+    # Send quit command to all attached clients
+    # This uses nvim's remote command to execute :qall
+    if nvim --server "$socket" --remote-send '<C-\><C-N>:qall<CR>' &>/dev/null; then
+        echo "[$name detached]"
+    else
+        echo "Failed to detach $name." >&2
+        exit 1
+    fi
+}
+
+# Show help message
+show_help() {
+    cat <<'EOF'
+nvim-screen - GNU screen-style session management for Neovim
+
+Usage: nvim-screen [options] [session-name]
+
+Options:
+  -S <name>      Create a new session with the specified name
+  -ls            List all sessions
+  -list          Same as -ls
+  -r [name]      Attach to session (creates if doesn't exist)
+  -R [name]      Attach to session (creates if doesn't exist)
+  -d <name>      Detach clients from the specified session
+  -h             Show this help message
+  -v             Show version information
+
+Session Management:
+  nvim-screen                   Create new session (auto-named from directory)
+  nvim-screen -S mysession      Create new session named 'mysession'
+  nvim-screen -r mysession      Attach to 'mysession'
+  nvim-screen -d mysession      Detach clients from 'mysession'
+  nvim-screen -ls               List all sessions
+
+Inside Neovim:
+  :qa or :qall   Detach from session
+  Ctrl-\ Ctrl-N  Enter normal mode (then :qa to detach)
+
+Session sockets are stored in: $XDG_RUNTIME_DIR/nvim-sessions-$USER/
+
+For more information, see: https://github.com/tijoseymathew/nvim-screen
+EOF
+}
+
+# Show version
+show_version() {
+    echo "nvim-screen version $VERSION"
+}
+
+# Main logic
+main() {
+    # No arguments: create session with auto-generated name
+    if [[ $# -eq 0 ]]; then
+        local name
+        name=$(generate_session_name)
+        attach_or_create "$name"
+        exit 0
+    fi
+
+    # Parse options
+    local option="$1"
+    shift || true
+
+    case "$option" in
+        -ls|-list)
+            list_sessions
+            ;;
+        -S)
+            if [[ $# -eq 0 ]]; then
+                echo "nvim-screen: option requires an argument -- 'S'" >&2
+                echo "Try 'nvim-screen -h' for more information." >&2
+                exit 1
+            fi
+            create_session "$1"
+            ;;
+        -r|-R)
+            if [[ $# -eq 0 ]]; then
+                # Try to find a session to attach
+                local session_dir
+                session_dir=$(get_session_dir)
+                cleanup_dead_sockets
+
+                if [[ ! -d "$session_dir" ]] || ! compgen -G "$session_dir/*.sock" &>/dev/null; then
+                    echo "There is no screen to be resumed." >&2
+                    exit 1
+                fi
+
+                # Get first available session
+                local socket
+                socket=$(ls -t "$session_dir"/*.sock 2>/dev/null | head -n1)
+                if [[ -z "$socket" ]]; then
+                    echo "There is no screen to be resumed." >&2
+                    exit 1
+                fi
+
+                local name
+                name=$(basename "$socket" .sock)
+                attach_or_create "$name"
+            else
+                attach_or_create "$1"
+            fi
+            ;;
+        -d)
+            if [[ $# -eq 0 ]]; then
+                echo "nvim-screen: option requires an argument -- 'd'" >&2
+                echo "Try 'nvim-screen -h' for more information." >&2
+                exit 1
+            fi
+            detach_session "$1"
+            ;;
+        -h|--help)
+            show_help
+            ;;
+        -v|--version)
+            show_version
+            ;;
+        *)
+            # Assume it's a session name
+            attach_or_create "$option"
+            ;;
+    esac
+}
+
+main "$@"
