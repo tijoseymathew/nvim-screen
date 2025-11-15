@@ -49,9 +49,8 @@ Single bash script. No dependencies beyond standard Unix tools.
 
 ## Requirements
 
-- Neovim 0.9+ (for `--remote-ui`)
+- Neovim 0.9+ (for `--remote-ui` and client-server features)
 - Bash
-- Standard Unix tools (lsof, etc.)
 
 ## Coming soon
 
