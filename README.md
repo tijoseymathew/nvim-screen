@@ -63,7 +63,6 @@ Commands available in sessions:
 - `:q`, `:quit`, `:qa`, etc. - Prompts for detach vs quit
 - `:q!` - Force quit (bypasses prompt)
 - `:Detach` - Explicitly detach from session
-- `:SessionQuit` - Explicitly quit the session
 
 ### Customizing Behavior
 
