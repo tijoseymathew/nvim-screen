@@ -39,9 +39,9 @@ is_socket_active() {
         return 1
     fi
 
-    # Check if nvim is actually listening on this socket
+    # Check if any process has the socket open
     if command -v lsof &>/dev/null; then
-        lsof -U -a -c nvim "$socket" &>/dev/null
+        lsof "$socket" &>/dev/null
     else
         # Fallback: try to connect
         # If nvim --server responds, socket is active
