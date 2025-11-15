@@ -9,6 +9,8 @@ set -euo pipefail
 VERSION="0.1.0"
 SESSION_DIR="${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-${USER}"
 SOCKET_PREFIX="nvim-session"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nvim-screen"
+DEFAULT_INIT_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/default-init.lua"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -18,6 +20,22 @@ NC='\033[0m' # No Color
 
 # Ensure session directory exists
 mkdir -p "$SESSION_DIR"
+
+# Function to get the init script to use
+get_init_script() {
+    local user_init="$CONFIG_DIR/init.lua"
+
+    # If user has a custom init script, use it
+    if [[ -f "$user_init" ]]; then
+        echo "$user_init"
+    # Otherwise, use the default one if it exists
+    elif [[ -f "$DEFAULT_INIT_SCRIPT" ]]; then
+        echo "$DEFAULT_INIT_SCRIPT"
+    # No init script available
+    else
+        echo ""
+    fi
+}
 
 # Function to generate a session name
 generate_session_name() {
@@ -88,8 +106,18 @@ start_session() {
         exit 1
     fi
 
+    # Get the init script to source
+    local init_script
+    init_script=$(get_init_script)
+
     # Start nvim with server listening on socket
-    exec nvim --listen "$socket_path"
+    if [[ -n "$init_script" ]]; then
+        # Source the init script after nvim's standard initialization
+        exec nvim --listen "$socket_path" -S "$init_script"
+    else
+        # No init script, just start normally
+        exec nvim --listen "$socket_path"
+    fi
 }
 
 # Function to attach to existing session

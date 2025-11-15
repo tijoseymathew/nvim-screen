@@ -47,6 +47,49 @@ Uses Neovim's native client-server features:
 
 Single bash script. No dependencies beyond standard Unix tools.
 
+## Configuration
+
+nvim-screen can inject custom initialization code when starting sessions. By default, it provides quit interception to prevent accidentally closing sessions.
+
+### Quit Interception
+
+When you press `:q` in a nvim-screen session, you'll be prompted:
+- **Detach** - Keep the session running in the background
+- **Quit** - Actually close the session
+
+This prevents accidentally closing a session when you meant to detach.
+
+Commands available in sessions:
+- `:q`, `:quit`, `:qa`, etc. - Prompts for detach vs quit
+- `:q!` - Force quit (bypasses prompt)
+- `:Detach` - Explicitly detach from session
+- `:SessionQuit` - Explicitly quit the session
+
+### Customizing Behavior
+
+Config location: `~/.config/nvim-screen/init.lua`
+
+To customize the behavior:
+```bash
+# Create config directory
+mkdir -p ~/.config/nvim-screen
+
+# Copy default config to customize
+cp /path/to/nvim-screen-repo/default-init.lua ~/.config/nvim-screen/init.lua
+
+# Edit to your preferences
+nvim ~/.config/nvim-screen/init.lua
+```
+
+To disable quit interception entirely:
+```bash
+# Create an empty init file
+mkdir -p ~/.config/nvim-screen
+touch ~/.config/nvim-screen/init.lua
+```
+
+The init script is pure Lua and has full access to Neovim's API. You can add any custom initialization code you want.
+
 ## Requirements
 
 - Neovim 0.9+ (for `--remote-ui` and client-server features)
