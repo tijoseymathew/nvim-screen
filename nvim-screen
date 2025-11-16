@@ -10,7 +10,6 @@ VERSION="0.1.0"
 SESSION_DIR="${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-${USER}"
 SOCKET_PREFIX="nvim-session"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nvim-screen"
-DEFAULT_INIT_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/default-init.lua"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -23,15 +22,9 @@ mkdir -p "$SESSION_DIR"
 
 # Function to get the init script to use
 get_init_script() {
-    local user_init="$CONFIG_DIR/init.lua"
-
-    # If user has a custom init script, use it
-    if [[ -f "$user_init" ]]; then
-        echo "$user_init"
-    # Otherwise, use the default one if it exists
-    elif [[ -f "$DEFAULT_INIT_SCRIPT" ]]; then
-        echo "$DEFAULT_INIT_SCRIPT"
-    # No init script available
+    local init_script="$CONFIG_DIR/init.lua"
+    if [[ -f "$init_script" ]]; then
+        echo "$init_script"
     else
         echo ""
     fi

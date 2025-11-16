@@ -18,9 +18,28 @@ But sessions matter. You need to detach from work and come back later, keep buil
 
 ## Installation
 
+**Recommended: Using install script**
+
 ```bash
+git clone https://github.com/tijoseymathew/nvim-screen.git
+cd nvim-screen
+./install.sh
+```
+
+This installs:
+- `nvim-screen` to `~/.local/bin/`
+- Default config to `~/.config/nvim-screen/init.lua`
+
+**Manual installation**
+
+```bash
+# Install script only
 curl -o ~/.local/bin/nvim-screen https://raw.githubusercontent.com/tijoseymathew/nvim-screen/main/nvim-screen
 chmod +x ~/.local/bin/nvim-screen
+
+# Optionally install default config for quit interception
+mkdir -p ~/.config/nvim-screen
+curl -o ~/.config/nvim-screen/init.lua https://raw.githubusercontent.com/tijoseymathew/nvim-screen/main/default-init.lua
 ```
 
 ## Usage
@@ -49,9 +68,9 @@ Single bash script. No dependencies beyond standard Unix tools.
 
 ## Configuration
 
-nvim-screen can inject custom initialization code when starting sessions. By default, it provides quit interception to prevent accidentally closing sessions.
+nvim-screen can inject custom initialization code when starting sessions. The default config (installed to `~/.config/nvim-screen/init.lua`) provides quit interception to prevent accidentally closing sessions.
 
-### Quit Interception
+### Quit Interception (Default)
 
 When you press `:q` in a nvim-screen session, you'll be prompted:
 - **Detach** - Keep the session running in the background
@@ -59,35 +78,28 @@ When you press `:q` in a nvim-screen session, you'll be prompted:
 
 This prevents accidentally closing a session when you meant to detach.
 
-Commands available in sessions:
+Commands available:
 - `:q`, `:quit`, `:qa`, etc. - Prompts for detach vs quit
 - `:q!` - Force quit (bypasses prompt)
 - `:detach` - Explicitly detach (built-in nvim command)
 
-### Customizing Behavior
+### Customizing
 
-Config location: `~/.config/nvim-screen/init.lua`
+The config file is installed at: `~/.config/nvim-screen/init.lua`
 
-To customize the behavior:
+**To customize:**
 ```bash
-# Create config directory
-mkdir -p ~/.config/nvim-screen
-
-# Copy default config to customize
-cp /path/to/nvim-screen-repo/default-init.lua ~/.config/nvim-screen/init.lua
-
-# Edit to your preferences
+# Edit the config directly
 nvim ~/.config/nvim-screen/init.lua
 ```
 
-To disable quit interception entirely:
+**To disable quit interception:**
 ```bash
-# Create an empty init file
-mkdir -p ~/.config/nvim-screen
-touch ~/.config/nvim-screen/init.lua
+# Just delete the config file
+rm ~/.config/nvim-screen/init.lua
 ```
 
-The init script is pure Lua and has full access to Neovim's API. You can add any custom initialization code you want.
+The init script is pure Lua with full access to Neovim's API. Add any custom initialization code you want.
 
 ## Requirements
 
