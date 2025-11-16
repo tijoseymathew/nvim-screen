@@ -99,10 +99,5 @@ vim.cmd([[
     cnoreabbrev <expr> xall! getcmdtype() == ':' && getcmdline() == 'xall!' ? 'lua nvim_screen_quitall_prompt("wall", true)' : 'xall!'
 ]])
 
--- Explicit detach command for convenience
-vim.api.nvim_create_user_command('Detach', function()
-    vim.fn.chanclose(vim.api.nvim_get_chan_info(0).id)
-end, {})
-
 -- Show a subtle message that session is active
-vim.notify("nvim-screen session active (use :Detach to detach)", vim.log.levels.INFO)
+vim.notify("nvim-screen session active (use :detach to detach)", vim.log.levels.INFO)

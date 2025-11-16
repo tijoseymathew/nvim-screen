@@ -62,7 +62,7 @@ This prevents accidentally closing a session when you meant to detach.
 Commands available in sessions:
 - `:q`, `:quit`, `:qa`, etc. - Prompts for detach vs quit
 - `:q!` - Force quit (bypasses prompt)
-- `:Detach` - Explicitly detach from session
+- `:detach` - Explicitly detach (built-in nvim command)
 
 ### Customizing Behavior
 
