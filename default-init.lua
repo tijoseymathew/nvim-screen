@@ -18,7 +18,7 @@ _G.nvim_screen_quit_prompt = function(write_cmd, force)
     -- Check for unsaved changes
     local modified = vim.bo.modified
     if modified then
-        vim.api.nvim_err_writeln("E37: No write since last change (add ! to override)")
+        vim.api.nvim_echo({{"E37: No write since last change (add ! to override)", "ErrorMsg"}}, false, {})
         return
     end
 
@@ -33,7 +33,7 @@ _G.nvim_screen_quit_prompt = function(write_cmd, force)
         { prompt = 'Close session or detach?' },
         function(choice)
             if choice == 'Detach' then
-                vim.fn.chanclose(vim.api.nvim_get_chan_info(0).id)
+                vim.cmd('detach')
             elseif choice == 'Quit' then
                 vim.cmd('quit!')
             end
@@ -53,8 +53,8 @@ _G.nvim_screen_quitall_prompt = function(write_cmd, force)
 
     -- Check for unsaved changes in any buffer
     for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-        if vim.api.nvim_buf_is_loaded(buf) and vim.api.nvim_buf_get_option(buf, 'modified') then
-            vim.api.nvim_err_writeln("E37: No write since last change (add ! to override)")
+        if vim.api.nvim_buf_is_loaded(buf) and vim.api.nvim_get_option_value('modified', {buf = buf}) then
+            vim.api.nvim_echo({{"E37: No write since last change (add ! to override)", "ErrorMsg"}}, false, {})
             return
         end
     end
@@ -68,7 +68,7 @@ _G.nvim_screen_quitall_prompt = function(write_cmd, force)
         { prompt = 'Close session or detach?' },
         function(choice)
             if choice == 'Detach' then
-                vim.fn.chanclose(vim.api.nvim_get_chan_info(0).id)
+                vim.cmd('detach')
             elseif choice == 'Quit all' then
                 vim.cmd('qall!')
             end
