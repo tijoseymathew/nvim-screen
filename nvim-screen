@@ -90,6 +90,8 @@ list_sessions() {
 # Function to start a new session
 start_session() {
     local session_name="$1"
+    shift
+    local nvim_args=("$@")
     local socket_path
     socket_path=$(get_socket_path "$session_name")
 
@@ -106,10 +108,10 @@ start_session() {
     # Start nvim with server listening on socket
     if [[ -n "$init_script" ]]; then
         # Source the init script after nvim's standard initialization
-        exec nvim --listen "$socket_path" -S "$init_script"
+        exec nvim --listen "$socket_path" -S "$init_script" "${nvim_args[@]}"
     else
         # No init script, just start normally
-        exec nvim --listen "$socket_path"
+        exec nvim --listen "$socket_path" "${nvim_args[@]}"
     fi
 }
 
@@ -278,7 +280,7 @@ show_usage() {
     cat << EOF
 Neovim Session Manager - GNU screen-like interface for Neovim
 
-Usage: $(basename $0) [options] [command]
+Usage: $(basename $0) [options] [command] [-- nvim_args...]
 
 Options:
   -S <name>      Start a new session with the specified name
@@ -289,6 +291,13 @@ Options:
   -wipe          Clean up stale/dead sessions
   -v, --version  Show version information
   -h, --help     Show this help message
+  --             Pass all following arguments to nvim
+
+Examples:
+  $(basename $0) -S myproject                    # Start new session named 'myproject'
+  $(basename $0) -S myproject -- file.txt        # Start session and open file.txt
+  $(basename $0) -- -O file1.txt file2.txt       # Start session with vertical split
+  $(basename $0) -S test -- -c 'set number'      # Start session with nvim command
 
 Inside Neovim:
   :detach                  Detach from session (keeps it running)
@@ -302,6 +311,7 @@ EOF
 main() {
     local action="start"
     local session_name=""
+    local nvim_args=()
 
     # Parse command line arguments
     while [[ $# -gt 0 ]]; do
@@ -363,6 +373,12 @@ main() {
                 show_usage
                 exit 0
                 ;;
+            --)
+                # Everything after -- is passed to nvim
+                shift
+                nvim_args=("$@")
+                break
+                ;;
             *)
                 echo -e "${RED}Unknown option: $1${NC}"
                 echo
@@ -381,7 +397,7 @@ main() {
             if [[ -z "$session_name" ]]; then
                 session_name=$(generate_session_name)
             fi
-            start_session "$session_name"
+            start_session "$session_name" "${nvim_args[@]}"
             ;;
         attach)
             if [[ -z "$session_name" ]]; then
