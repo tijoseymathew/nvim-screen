@@ -23,15 +23,16 @@ vim.api.nvim_create_autocmd("QuitPre", {
         )
 
         if choice == 1 then
-            -- Detach
+            -- Detach - close connection but keep server running
             vim.cmd('detach')
+            return  -- Don't error - detach will handle closing
         elseif choice == 2 then
             -- Quit - use ! to bypass this autocmd
             vim.cmd('quit!')
+            return  -- Don't error - we already quit
         end
-        -- If choice == 0 (cancelled with Esc), do nothing
 
-        -- Prevent the original quit from executing
+        -- If choice == 0 (cancelled with Esc), prevent the quit
         error("")
     end
 })
