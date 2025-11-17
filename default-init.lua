@@ -1,103 +1,48 @@
 -- nvim-screen default initialization
 -- This file is sourced when starting a new nvim-screen session
 --
--- You can customize this by copying it to ~/.config/nvim-screen/init.lua
--- To disable this behavior, create an empty init.lua file
+-- You can customize this by editing ~/.config/nvim-screen/init.lua
+-- To disable this behavior, delete the config file
 
--- Prompt user for detach vs quit
-_G.nvim_screen_quit_prompt = function(write_cmd, force)
-    -- If force quit (!) is used, just quit
-    if force then
-        if write_cmd then
-            vim.cmd(write_cmd)
-        end
-        vim.cmd('quit!')
-        return
-    end
-
-    -- Check for unsaved changes
-    local modified = vim.bo.modified
-    if modified then
-        vim.api.nvim_echo({{"E37: No write since last change (add ! to override)", "ErrorMsg"}}, false, {})
-        return
-    end
-
-    -- Write if requested
-    if write_cmd then
-        vim.cmd(write_cmd)
-    end
-
-    -- Prompt user
-    vim.ui.select(
-        {'Detach', 'Quit'},
-        { prompt = 'Close session or detach?' },
-        function(choice)
-            if choice == 'Detach' then
-                vim.cmd('detach')
-            elseif choice == 'Quit' then
-                vim.cmd('quit!')
-            end
-        end
-    )
-end
-
--- Similar for qall
-_G.nvim_screen_quitall_prompt = function(write_cmd, force)
-    if force then
-        if write_cmd then
-            vim.cmd(write_cmd)
-        end
-        vim.cmd('qall!')
-        return
-    end
-
-    -- Check for unsaved changes in any buffer
-    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-        if vim.api.nvim_buf_is_loaded(buf) and vim.api.nvim_get_option_value('modified', {buf = buf}) then
-            vim.api.nvim_echo({{"E37: No write since last change (add ! to override)", "ErrorMsg"}}, false, {})
+-- Use QuitPre autocommand to intercept quit attempts
+vim.api.nvim_create_autocmd("QuitPre", {
+    group = vim.api.nvim_create_augroup("nvim_screen_quit_prompt", { clear = true }),
+    callback = function()
+        -- Check if it's a force quit by looking at the last command
+        local last_cmd = vim.fn.histget('cmd', -1)
+        if last_cmd:match('!%s*$') then
+            -- Force quit - allow it to proceed
             return
         end
-    end
 
-    if write_cmd then
-        vim.cmd(write_cmd)
-    end
-
-    vim.ui.select(
-        {'Detach', 'Quit all'},
-        { prompt = 'Close session or detach?' },
-        function(choice)
-            if choice == 'Detach' then
-                vim.cmd('detach')
-            elseif choice == 'Quit all' then
-                vim.cmd('qall!')
-            end
+        -- Check for unsaved changes - Neovim will handle this, but we want consistent UX
+        local modified = vim.bo.modified
+        if modified then
+            vim.api.nvim_echo({{"E37: No write since last change (add ! to override)", "ErrorMsg"}}, false, {})
+            error("")  -- Abort the quit
         end
-    )
-end
 
--- Command abbreviations to intercept quit commands
-vim.cmd([[
-    cnoreabbrev <expr> q getcmdtype() == ':' && getcmdline() == 'q' ? 'lua nvim_screen_quit_prompt(nil, false)' : 'q'
-    cnoreabbrev <expr> q! getcmdtype() == ':' && getcmdline() == 'q!' ? 'lua nvim_screen_quit_prompt(nil, true)' : 'q!'
-    cnoreabbrev <expr> quit getcmdtype() == ':' && getcmdline() == 'quit' ? 'lua nvim_screen_quit_prompt(nil, false)' : 'quit'
-    cnoreabbrev <expr> quit! getcmdtype() == ':' && getcmdline() == 'quit!' ? 'lua nvim_screen_quit_prompt(nil, true)' : 'quit!'
+        -- Schedule the prompt to avoid blocking the quit event
+        vim.schedule(function()
+            vim.ui.select(
+                {'Detach', 'Quit'},
+                { prompt = 'Close session or detach?' },
+                function(choice)
+                    if choice == 'Detach' then
+                        vim.cmd('detach')
+                    elseif choice == 'Quit' then
+                        -- Use force quit to bypass this autocmd
+                        vim.cmd('quit!')
+                    end
+                    -- If choice is nil (cancelled), do nothing
+                end
+            )
+        end)
 
-    cnoreabbrev <expr> qa getcmdtype() == ':' && getcmdline() == 'qa' ? 'lua nvim_screen_quitall_prompt(nil, false)' : 'qa'
-    cnoreabbrev <expr> qa! getcmdtype() == ':' && getcmdline() == 'qa!' ? 'lua nvim_screen_quitall_prompt(nil, true)' : 'qa!'
-    cnoreabbrev <expr> qall getcmdtype() == ':' && getcmdline() == 'qall' ? 'lua nvim_screen_quitall_prompt(nil, false)' : 'qall'
-    cnoreabbrev <expr> qall! getcmdtype() == ':' && getcmdline() == 'qall!' ? 'lua nvim_screen_quitall_prompt(nil, true)' : 'qall!'
-
-    cnoreabbrev <expr> wq getcmdtype() == ':' && getcmdline() == 'wq' ? 'lua nvim_screen_quit_prompt("write", false)' : 'wq'
-    cnoreabbrev <expr> wq! getcmdtype() == ':' && getcmdline() == 'wq!' ? 'lua nvim_screen_quit_prompt("write", true)' : 'wq!'
-    cnoreabbrev <expr> x getcmdtype() == ':' && getcmdline() == 'x' ? 'lua nvim_screen_quit_prompt(vim.bo.modified and "write" or nil, false)' : 'x'
-    cnoreabbrev <expr> x! getcmdtype() == ':' && getcmdline() == 'x!' ? 'lua nvim_screen_quit_prompt(vim.bo.modified and "write" or nil, true)' : 'x!'
-
-    cnoreabbrev <expr> wqa getcmdtype() == ':' && getcmdline() == 'wqa' ? 'lua nvim_screen_quitall_prompt("wall", false)' : 'wqa'
-    cnoreabbrev <expr> wqa! getcmdtype() == ':' && getcmdline() == 'wqa!' ? 'lua nvim_screen_quitall_prompt("wall", true)' : 'wqa!'
-    cnoreabbrev <expr> xall getcmdtype() == ':' && getcmdline() == 'xall' ? 'lua nvim_screen_quitall_prompt("wall", false)' : 'xall'
-    cnoreabbrev <expr> xall! getcmdtype() == ':' && getcmdline() == 'xall!' ? 'lua nvim_screen_quitall_prompt("wall", true)' : 'xall!'
-]])
+        -- Abort the current quit attempt
+        error("")  -- Empty error to minimize output
+    end
+})
 
 -- Show a subtle message that session is active
 vim.notify("nvim-screen session active (use :detach to detach)", vim.log.levels.INFO)
