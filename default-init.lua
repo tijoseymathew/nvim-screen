@@ -15,32 +15,24 @@ vim.api.nvim_create_autocmd("QuitPre", {
             return
         end
 
-        -- Check for unsaved changes - Neovim will handle this, but we want consistent UX
-        local modified = vim.bo.modified
-        if modified then
-            vim.api.nvim_echo({{"E37: No write since last change (add ! to override)", "ErrorMsg"}}, false, {})
-            error("")  -- Abort the quit
+        -- Show synchronous prompt
+        local choice = vim.fn.confirm(
+            'Close session or detach?',
+            '&Detach\n&Quit',
+            1  -- Default to Detach
+        )
+
+        if choice == 1 then
+            -- Detach
+            vim.cmd('detach')
+        elseif choice == 2 then
+            -- Quit - use ! to bypass this autocmd
+            vim.cmd('quit!')
         end
+        -- If choice == 0 (cancelled with Esc), do nothing
 
-        -- Schedule the prompt to avoid blocking the quit event
-        vim.schedule(function()
-            vim.ui.select(
-                {'Detach', 'Quit'},
-                { prompt = 'Close session or detach?' },
-                function(choice)
-                    if choice == 'Detach' then
-                        vim.cmd('detach')
-                    elseif choice == 'Quit' then
-                        -- Use force quit to bypass this autocmd
-                        vim.cmd('quit!')
-                    end
-                    -- If choice is nil (cancelled), do nothing
-                end
-            )
-        end)
-
-        -- Abort the current quit attempt
-        error("")  -- Empty error to minimize output
+        -- Prevent the original quit from executing
+        error("")
     end
 })
 
