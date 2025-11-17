@@ -18,28 +18,26 @@ But sessions matter. You need to detach from work and come back later, keep buil
 
 ## Installation
 
-**Recommended: Using install script**
+**Quick install (recommended):**
 
 ```bash
-git clone https://github.com/tijoseymathew/nvim-screen.git
-cd nvim-screen
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/tijoseymathew/nvim-screen/main/install.sh | bash
 ```
 
 This installs:
 - `nvim-screen` to `~/.local/bin/`
 - Default config to `~/.config/nvim-screen/init.lua`
 
-**Manual installation**
+**Manual installation:**
 
 ```bash
 # Install script only
-curl -o ~/.local/bin/nvim-screen https://raw.githubusercontent.com/tijoseymathew/nvim-screen/main/nvim-screen
+curl -fsSL https://raw.githubusercontent.com/tijoseymathew/nvim-screen/main/nvim-screen -o ~/.local/bin/nvim-screen
 chmod +x ~/.local/bin/nvim-screen
 
 # Optionally install default config for quit interception
 mkdir -p ~/.config/nvim-screen
-curl -o ~/.config/nvim-screen/init.lua https://raw.githubusercontent.com/tijoseymathew/nvim-screen/main/default-init.lua
+curl -fsSL https://raw.githubusercontent.com/tijoseymathew/nvim-screen/main/init.lua -o ~/.config/nvim-screen/init.lua
 ```
 
 ## Usage
