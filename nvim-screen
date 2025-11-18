@@ -40,34 +40,46 @@ get_ssh_control_path() {
     echo "$SESSION_DIR/${SSH_CONTROL_PREFIX}-${safe_host}.sock"
 }
 
-# Function to encode remote session name
-# Format: host:sessionname
-encode_remote_session() {
-    local ssh_host="$1"
-    local session_name="$2"
-    echo "${ssh_host}:${session_name}"
+# Function to get hostname from SSH control socket path
+get_host_from_control_path() {
+    local control_path="$1"
+    local filename="${control_path##*/}"
+    local safe_host="${filename#${SSH_CONTROL_PREFIX}-}"
+    safe_host="${safe_host%.sock}"
+    # Reverse the sanitization (best effort, may not be perfect)
+    echo "$safe_host"
 }
 
-# Function to parse session name and extract SSH host
-# Returns empty string if it's a local session
-parse_ssh_host() {
-    local full_session_name="$1"
-    if [[ "$full_session_name" =~ ^([^:]+):(.+)$ ]]; then
-        echo "${BASH_REMATCH[1]}"
-    else
-        echo ""
-    fi
+# Function to get all active SSH hosts
+get_active_ssh_hosts() {
+    local hosts=()
+    for control_socket in "$SESSION_DIR"/${SSH_CONTROL_PREFIX}-*.sock; do
+        if [[ -S "$control_socket" ]]; then
+            local host
+            host=$(get_host_from_control_path "$control_socket")
+            if check_ssh_control_master "$control_socket" 2>/dev/null; then
+                hosts+=("$host")
+            fi
+        fi
+    done
+    printf '%s\n' "${hosts[@]}"
 }
 
-# Function to parse session name and extract base session name
-# Strips SSH host prefix if present
-parse_session_name() {
-    local full_session_name="$1"
-    if [[ "$full_session_name" =~ ^([^:]+):(.+)$ ]]; then
-        echo "${BASH_REMATCH[2]}"
-    else
-        echo "$full_session_name"
-    fi
+# Function to find which remote host has a session
+find_remote_session() {
+    local session_name="$1"
+    local hosts
+    mapfile -t hosts < <(get_active_ssh_hosts)
+
+    for host in "${hosts[@]}"; do
+        # Check if session exists on this host
+        if ssh_exec "$host" "[ -S \"\${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-\$USER/nvim-session-$session_name.sock\" ]" 2>/dev/null; then
+            echo "$host"
+            return 0
+        fi
+    done
+
+    return 1
 }
 
 # Function to check if SSH control master is active
@@ -194,33 +206,21 @@ list_sessions() {
     fi
 
     # List local sessions
-    echo "Active Neovim sessions:"
+    echo "Active Neovim sessions (local):"
     echo
 
     for socket in "$SESSION_DIR"/${SOCKET_PREFIX}-*.sock; do
         if [[ -S "$socket" ]]; then
             has_sessions=true
-            local full_session_name="${socket##*/}"
-            full_session_name="${full_session_name#${SOCKET_PREFIX}-}"
-            full_session_name="${full_session_name%.sock}"
-
-            # Parse session name to check if it's remote
-            local remote_host
-            remote_host=$(parse_ssh_host "$full_session_name")
+            local session_name="${socket##*/}"
+            session_name="${session_name#${SOCKET_PREFIX}-}"
+            session_name="${session_name%.sock}"
 
             # Check if session is healthy
             if check_socket_health "$socket"; then
-                if [[ -n "$remote_host" ]]; then
-                    echo -e "  ${GREEN}●${NC} $full_session_name (healthy, remote)"
-                else
-                    echo -e "  ${GREEN}●${NC} $full_session_name (healthy)"
-                fi
+                echo -e "  ${GREEN}●${NC} $session_name (healthy)"
             else
-                if [[ -n "$remote_host" ]]; then
-                    echo -e "  ${YELLOW}○${NC} $full_session_name (unresponsive, remote)"
-                else
-                    echo -e "  ${YELLOW}○${NC} $full_session_name (unresponsive)"
-                fi
+                echo -e "  ${YELLOW}○${NC} $session_name (unresponsive)"
             fi
         fi
     done
@@ -229,6 +229,22 @@ list_sessions() {
         echo "  No active sessions"
     fi
     echo
+
+    # List sessions on all active remote hosts
+    local hosts
+    mapfile -t hosts < <(get_active_ssh_hosts)
+
+    if [[ ${#hosts[@]} -gt 0 ]]; then
+        for host in "${hosts[@]}"; do
+            if [[ -n "$host" ]]; then
+                echo "Active Neovim sessions on $host:"
+                echo
+                local remote_output
+                remote_output=$(ssh_exec "$host" "nvim-screen -ls" 2>&1)
+                echo "$remote_output"
+            fi
+        done
+    fi
 }
 
 # Function to start a new session
@@ -248,19 +264,6 @@ start_session() {
 
     if [[ -n "$ssh_host" ]]; then
         # Start remote session via SSH
-        # Encode session name with SSH host
-        local encoded_name
-        encoded_name=$(encode_remote_session "$ssh_host" "$session_name")
-        local marker_path
-        marker_path=$(get_socket_path "$encoded_name")
-
-        # Check if remote session already exists locally
-        if [[ -e "$marker_path" ]]; then
-            echo -e "${YELLOW}Session '$session_name' on $ssh_host already exists.${NC}"
-            echo "Use '$0 -r $encoded_name' to attach to it."
-            exit 1
-        fi
-
         # Build nvim args string for remote execution
         local nvim_args_str=""
         if [[ ${#nvim_args[@]} -gt 0 ]]; then
@@ -270,12 +273,9 @@ start_session() {
 
         echo "Starting remote session '$session_name' on $ssh_host..."
 
-        # Create a local marker file to track this remote session
-        touch "$marker_path"
-
         # Start remote session via SSH with pseudo-terminal
         # This will execute nvim-screen on the remote host and attach to it
-        exec ssh -t -S "$(get_ssh_control_path "$ssh_host")" "$ssh_host" \
+        exec ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
             "nvim-screen -S '$session_name'$nvim_args_str"
     else
         # Local session - original behavior
@@ -300,35 +300,30 @@ attach_session() {
     local socket_path
     socket_path=$(get_socket_path "$session_name")
 
-    # Check if this is a remote session by parsing the session name
+    # Check if session exists locally first
+    if [[ -S "$socket_path" ]]; then
+        # Local session - attach to it
+        exec nvim --server "$socket_path" --remote-ui
+    fi
+
+    # Not found locally, search remote hosts
+    echo "Session not found locally, searching remote hosts..."
     local ssh_host
-    ssh_host=$(parse_ssh_host "$session_name")
-    local base_session_name
-    base_session_name=$(parse_session_name "$session_name")
+    ssh_host=$(find_remote_session "$session_name")
 
     if [[ -n "$ssh_host" ]]; then
-        echo "Attaching to remote session '$base_session_name' on $ssh_host..."
-
-        # Establish SSH control master if not already active
-        if ! establish_ssh_control_master "$ssh_host"; then
-            echo -e "${RED}Failed to establish SSH connection${NC}"
-            exit 1
-        fi
+        echo "Found session '$session_name' on $ssh_host, attaching..."
 
         # Attach to remote session via SSH with pseudo-terminal
-        exec ssh -t -S "$(get_ssh_control_path "$ssh_host")" "$ssh_host" \
-            "nvim-screen -r '$base_session_name'"
+        exec ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
+            "nvim-screen -r '$session_name'"
     fi
 
-    if [[ ! -S "$socket_path" ]]; then
-        echo -e "${RED}Error: Session '$session_name' not found.${NC}"
-        echo
-        list_sessions ""
-        exit 1
-    fi
-
-    # Attach to existing nvim server
-    exec nvim --server "$socket_path" --remote-ui
+    # Not found anywhere
+    echo -e "${RED}Error: Session '$session_name' not found.${NC}"
+    echo
+    list_sessions ""
+    exit 1
 }
 
 # Function to list channels for debugging
@@ -337,47 +332,42 @@ list_channels() {
     local socket_path
     socket_path=$(get_socket_path "$session_name")
 
-    # Check if this is a remote session by parsing the session name
+    # Check if session exists locally
+    if [[ -S "$socket_path" ]]; then
+        echo "Listing channels for session: $session_name"
+        echo
+
+        # Get channel count
+        echo "Number of channels:"
+        nvim --headless --server "$socket_path" --remote-expr \
+            'luaeval("#vim.api.nvim_list_chans()")' 2>&1
+
+        echo
+        echo "Channel details (JSON format):"
+        nvim --headless --server "$socket_path" --remote-expr \
+            'luaeval("vim.json.encode(vim.api.nvim_list_chans())")' 2>&1 | jq '.' 2>/dev/null || cat
+
+        echo
+        echo "Channel summary:"
+        nvim --headless --server "$socket_path" --remote-expr \
+            'execute("lua for _, c in ipairs(vim.api.nvim_list_chans()) do print(string.format(\"ID: %d, Mode: %s\", c.id, c.mode or \"none\")) end")' 2>&1
+        return
+    fi
+
+    # Check if this is a remote session
     local ssh_host
-    ssh_host=$(parse_ssh_host "$session_name")
-    local base_session_name
-    base_session_name=$(parse_session_name "$session_name")
+    ssh_host=$(find_remote_session "$session_name")
 
     if [[ -n "$ssh_host" ]]; then
         # For remote session, execute channels command on remote host
-        echo "Listing channels for remote session '$base_session_name' on $ssh_host..."
+        echo "Listing channels for remote session '$session_name' on $ssh_host..."
 
-        if ! establish_ssh_control_master "$ssh_host"; then
-            echo -e "${RED}Failed to establish SSH connection${NC}"
-            exit 1
-        fi
-
-        ssh_exec "$ssh_host" "nvim-screen -channels '$base_session_name'"
+        ssh_exec "$ssh_host" "nvim-screen -channels '$session_name'"
         return $?
     fi
 
-    if [[ ! -S "$socket_path" ]]; then
-        echo -e "${RED}Error: Session '$session_name' not found.${NC}"
-        exit 1
-    fi
-
-    echo "Listing channels for session: $session_name"
-    echo
-
-    # Get channel count
-    echo "Number of channels:"
-    nvim --headless --server "$socket_path" --remote-expr \
-        'luaeval("#vim.api.nvim_list_chans()")' 2>&1
-
-    echo
-    echo "Channel details (JSON format):"
-    nvim --headless --server "$socket_path" --remote-expr \
-        'luaeval("vim.json.encode(vim.api.nvim_list_chans())")' 2>&1 | jq '.' 2>/dev/null || cat
-
-    echo
-    echo "Channel summary:"
-    nvim --headless --server "$socket_path" --remote-expr \
-        'execute("lua for _, c in ipairs(vim.api.nvim_list_chans()) do print(string.format(\"ID: %d, Mode: %s\", c.id, c.mode or \"none\")) end")' 2>&1
+    echo -e "${RED}Error: Session '$session_name' not found.${NC}"
+    exit 1
 }
 
 # Function to detach from a session (close all UI clients)
@@ -386,62 +376,57 @@ detach_session() {
     local socket_path
     socket_path=$(get_socket_path "$session_name")
 
-    # Check if this is a remote session by parsing the session name
-    local ssh_host
-    ssh_host=$(parse_ssh_host "$session_name")
-    local base_session_name
-    base_session_name=$(parse_session_name "$session_name")
-
-    if [[ -n "$ssh_host" ]]; then
-        # For remote session, execute detach on remote host
-        echo "Detaching from remote session '$base_session_name' on $ssh_host..."
-
-        if ! establish_ssh_control_master "$ssh_host"; then
-            echo -e "${RED}Failed to establish SSH connection${NC}"
-            exit 1
-        fi
-
-        ssh_exec "$ssh_host" "nvim-screen -d '$base_session_name'"
-        return $?
-    fi
-
-    if [[ ! -S "$socket_path" ]]; then
-        echo -e "${RED}Error: Session '$session_name' not found.${NC}"
-        exit 1
-    fi
-
-    # Get list of UI channel IDs to close (socket-based UIs only, not the stdio server)
-    local channel_ids
-    channel_ids=$(nvim --headless --server "$socket_path" --remote-expr "$(cat <<'LUA'
+    # Check if session exists locally
+    if [[ -S "$socket_path" ]]; then
+        # Get list of UI channel IDs to close (socket-based UIs only, not the stdio server)
+        local channel_ids
+        channel_ids=$(nvim --headless --server "$socket_path" --remote-expr "$(cat <<'LUA'
 execute("lua for _, c in ipairs(vim.api.nvim_list_chans()) do
   if c.stream == \"socket\" and c.client and c.client.type == \"ui\" then
     print(c.id)
   end
 end")
 LUA
-    )" 2>&1)
+        )" 2>&1)
 
-    if [[ -z "$channel_ids" ]]; then
-        echo -e "${YELLOW}No UI clients to detach from session '$session_name'${NC}"
+        if [[ -z "$channel_ids" ]]; then
+            echo -e "${YELLOW}No UI clients to detach from session '$session_name'${NC}"
+            return
+        fi
+
+        # Close each UI channel
+        local closed=0
+        while IFS= read -r chan_id; do
+            if [[ -n "$chan_id" && "$chan_id" =~ ^[0-9]+$ ]]; then
+                if nvim --headless --server "$socket_path" --remote-expr \
+                    "luaeval(\"vim.fn.chanclose($chan_id)\")" &>/dev/null; then
+                    closed=$((closed + 1))
+                fi
+            fi
+        done <<< "$channel_ids"
+
+        if [[ $closed -gt 0 ]]; then
+            echo -e "${GREEN}Detached $closed UI client(s) from session '$session_name'${NC}"
+        else
+            echo -e "${RED}Failed to detach UI clients${NC}"
+        fi
         return
     fi
 
-    # Close each UI channel
-    local closed=0
-    while IFS= read -r chan_id; do
-        if [[ -n "$chan_id" && "$chan_id" =~ ^[0-9]+$ ]]; then
-            if nvim --headless --server "$socket_path" --remote-expr \
-                "luaeval(\"vim.fn.chanclose($chan_id)\")" &>/dev/null; then
-                closed=$((closed + 1))
-            fi
-        fi
-    done <<< "$channel_ids"
+    # Check if this is a remote session
+    local ssh_host
+    ssh_host=$(find_remote_session "$session_name")
 
-    if [[ $closed -gt 0 ]]; then
-        echo -e "${GREEN}Detached $closed UI client(s) from session '$session_name'${NC}"
-    else
-        echo -e "${RED}Failed to detach UI clients${NC}"
+    if [[ -n "$ssh_host" ]]; then
+        # For remote session, execute detach on remote host
+        echo "Detaching from remote session '$session_name' on $ssh_host..."
+
+        ssh_exec "$ssh_host" "nvim-screen -d '$session_name'"
+        return $?
     fi
+
+    echo -e "${RED}Error: Session '$session_name' not found.${NC}"
+    exit 1
 }
 
 # Function to kill/terminate a session
@@ -450,25 +435,49 @@ kill_session() {
     local socket_path
     socket_path=$(get_socket_path "$session_name")
 
-    # Check if this is a remote session by parsing the session name
+    # Check if session exists locally
+    if [[ -S "$socket_path" ]]; then
+        echo "Terminating session: $session_name"
+
+        # Try graceful quit via nvim remote-send
+        if nvim --headless --server "$socket_path" --remote-send '<C-\><C-N>:qa<CR>' 2>/dev/null; then
+            # Wait a bit for the session to close
+            sleep 0.5
+
+            # Check if the session closed successfully
+            if [[ ! -S "$socket_path" ]]; then
+                echo -e "${GREEN}Session terminated successfully${NC}"
+                return 0
+            elif ! check_socket_health "$socket_path"; then
+                echo -e "${GREEN}Session terminated (socket cleanup pending)${NC}"
+                # Clean up unresponsive socket
+                rm -f "$socket_path"
+                return 0
+            else
+                echo -e "${YELLOW}Warning: Session still running (may have unsaved changes)${NC}"
+                return 1
+            fi
+        else
+            echo -e "${RED}Failed to send quit command to session${NC}"
+            # Try to clean up stale socket
+            if ! check_socket_health "$socket_path"; then
+                echo "Cleaning up unresponsive socket..."
+                rm -f "$socket_path"
+            fi
+            return 1
+        fi
+    fi
+
+    # Check if this is a remote session
     local ssh_host
-    ssh_host=$(parse_ssh_host "$session_name")
-    local base_session_name
-    base_session_name=$(parse_session_name "$session_name")
+    ssh_host=$(find_remote_session "$session_name")
 
     if [[ -n "$ssh_host" ]]; then
         # For remote session, execute kill on remote host
-        echo "Terminating remote session '$base_session_name' on $ssh_host..."
-
-        if ! establish_ssh_control_master "$ssh_host"; then
-            echo -e "${RED}Failed to establish SSH connection${NC}"
-            exit 1
-        fi
+        echo "Terminating remote session '$session_name' on $ssh_host..."
 
         # Kill remote session
-        if ssh_exec "$ssh_host" "nvim-screen -d '$base_session_name'"; then
-            # Clean up local marker file
-            rm -f "$socket_path"
+        if ssh_exec "$ssh_host" "nvim-screen -d '$session_name'"; then
             echo -e "${GREEN}Remote session terminated successfully${NC}"
             return 0
         else
@@ -477,96 +486,42 @@ kill_session() {
         fi
     fi
 
-    if [[ ! -S "$socket_path" ]]; then
-        echo -e "${RED}Error: Session '$session_name' not found.${NC}"
-        exit 1
-    fi
-
-    echo "Terminating session: $session_name"
-
-    # Try graceful quit via nvim remote-send
-    if nvim --headless --server "$socket_path" --remote-send '<C-\><C-N>:qa<CR>' 2>/dev/null; then
-        # Wait a bit for the session to close
-        sleep 0.5
-
-        # Check if the session closed successfully
-        if [[ ! -S "$socket_path" ]]; then
-            echo -e "${GREEN}Session terminated successfully${NC}"
-            return 0
-        elif ! check_socket_health "$socket_path"; then
-            echo -e "${GREEN}Session terminated (socket cleanup pending)${NC}"
-            # Clean up unresponsive socket
-            rm -f "$socket_path"
-            return 0
-        else
-            echo -e "${YELLOW}Warning: Session still running (may have unsaved changes)${NC}"
-            return 1
-        fi
-    else
-        echo -e "${RED}Failed to send quit command to session${NC}"
-        # Try to clean up stale socket
-        if ! check_socket_health "$socket_path"; then
-            echo "Cleaning up unresponsive socket..."
-            rm -f "$socket_path"
-        fi
-        return 1
-    fi
+    echo -e "${RED}Error: Session '$session_name' not found.${NC}"
+    exit 1
 }
 
 # Function to clean up stale sockets
 cleanup_stale_sockets() {
     local cleaned=0
 
-    for item in "$SESSION_DIR"/${SOCKET_PREFIX}-*.sock; do
-        if [[ ! -e "$item" ]]; then
-            continue
-        fi
-
-        local full_session_name="${item##*/}"
-        full_session_name="${full_session_name#${SOCKET_PREFIX}-}"
-        full_session_name="${full_session_name%.sock}"
-
-        # Parse to check if it's a remote session
-        local ssh_host
-        ssh_host=$(parse_ssh_host "$full_session_name")
-        local base_session_name
-        base_session_name=$(parse_session_name "$full_session_name")
-
-        if [[ -S "$item" ]]; then
-            # It's a real socket (local session)
-            if ! check_socket_health "$item"; then
-                echo "Removing stale socket: ${item##*/}"
-                rm -f "$item"
+    # Clean up stale local session sockets
+    for socket in "$SESSION_DIR"/${SOCKET_PREFIX}-*.sock; do
+        if [[ -S "$socket" ]]; then
+            # Check if socket is healthy
+            if ! check_socket_health "$socket"; then
+                echo "Removing stale socket: ${socket##*/}"
+                rm -f "$socket"
                 cleaned=$((cleaned + 1))
             fi
-        elif [[ -f "$item" ]] && [[ -n "$ssh_host" ]]; then
-            # It's a marker file for a remote session
-            # Try to verify if remote session still exists
-            if establish_ssh_control_master "$ssh_host" 2>/dev/null; then
-                local remote_exists
-                remote_exists=$(ssh_exec "$ssh_host" "[ -S \"\${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-\$USER/nvim-session-$base_session_name.sock\" ] && echo 'yes' || echo 'no'" 2>/dev/null)
+        fi
+    done
 
-                if [[ "$remote_exists" != "yes" ]]; then
-                    echo "Removing orphaned remote session marker: ${item##*/}"
-                    rm -f "$item"
-                    cleaned=$((cleaned + 1))
-                fi
-            else
-                echo "Warning: Cannot verify remote session '$base_session_name' on $ssh_host"
-                echo "  Marker file exists but connection failed."
+    # Clean up stale SSH control master sockets
+    for control_socket in "$SESSION_DIR"/${SSH_CONTROL_PREFIX}-*.sock; do
+        if [[ -S "$control_socket" ]]; then
+            # Check if control master is still active
+            if ! check_ssh_control_master "$control_socket" 2>/dev/null; then
+                echo "Removing stale SSH control socket: ${control_socket##*/}"
+                rm -f "$control_socket"
+                cleaned=$((cleaned + 1))
             fi
-        elif [[ -f "$item" ]]; then
-            # It's a marker file but not properly formatted - remove it
-            echo "Removing invalid marker file: ${item##*/}"
-            rm -f "$item"
-            cleaned=$((cleaned + 1))
         fi
     done
 
     if [[ $cleaned -eq 0 ]]; then
-        echo "No stale sessions found."
+        echo "No stale sockets found."
     else
-        echo "Removed $cleaned stale item(s)."
+        echo "Removed $cleaned stale socket(s)."
     fi
 }
 
@@ -734,13 +689,12 @@ main() {
             ;;
         attach)
             if [[ -z "$session_name" ]]; then
-                # Find available sessions (both local sockets and remote marker files)
+                # Find available local sessions
                 local available_sessions=()
 
-                # Look for all .sock files (both real sockets and marker files)
-                for item in "$SESSION_DIR"/${SOCKET_PREFIX}-*.sock; do
-                    if [[ -e "$item" ]]; then
-                        local name="${item##*/}"
+                for socket in "$SESSION_DIR"/${SOCKET_PREFIX}-*.sock; do
+                    if [[ -S "$socket" ]]; then
+                        local name="${socket##*/}"
                         name="${name#${SOCKET_PREFIX}-}"
                         name="${name%.sock}"
                         available_sessions+=("$name")
@@ -748,7 +702,8 @@ main() {
                 done
 
                 if [[ ${#available_sessions[@]} -eq 0 ]]; then
-                    echo -e "${RED}No active sessions found.${NC}"
+                    echo -e "${RED}No active local sessions found.${NC}"
+                    echo "Use 'nvim-screen -ls' to see all sessions including remote ones."
                     exit 1
                 elif [[ ${#available_sessions[@]} -eq 1 ]]; then
                     session_name="${available_sessions[0]}"
