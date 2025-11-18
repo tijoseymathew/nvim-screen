@@ -16,6 +16,7 @@ BASE_URL="https://raw.githubusercontent.com/tijoseymathew/nvim-screen/${GITHUB_B
 # Default locations
 BIN_DIR="${HOME}/.local/bin"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nvim-screen"
+COMPLETION_DIR="${HOME}/.local/share/bash-completion/completions"
 
 echo -e "${BLUE}nvim-screen installer${NC}"
 echo
@@ -29,6 +30,7 @@ fi
 # Create directories if they don't exist
 mkdir -p "$BIN_DIR"
 mkdir -p "$CONFIG_DIR"
+mkdir -p "$COMPLETION_DIR"
 
 # Download and install the main script
 echo -e "${BLUE}Downloading nvim-screen...${NC}"
@@ -66,6 +68,15 @@ else
     fi
 fi
 
+# Install bash completion
+echo
+echo -e "${BLUE}Downloading bash completion...${NC}"
+if curl -fsSL "${BASE_URL}/bash-completion.sh" -o "$COMPLETION_DIR/nvim-screen"; then
+    echo -e "${GREEN}✓${NC} Installed bash completion to $COMPLETION_DIR/nvim-screen"
+else
+    echo -e "${YELLOW}⚠${NC} Failed to download bash completion (non-fatal)"
+fi
+
 echo
 echo -e "${GREEN}Installation complete!${NC}"
 echo
@@ -79,3 +90,8 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     echo -e "  ${BLUE}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
     echo
 fi
+
+# Bash completion note
+echo -e "${YELLOW}Note:${NC} To enable bash completions, restart your shell or run:"
+echo -e "  ${BLUE}source $COMPLETION_DIR/nvim-screen${NC}"
+echo
