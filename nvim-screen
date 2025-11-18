@@ -355,68 +355,6 @@ attach_session() {
     exit 1
 }
 
-# Function to list channels for debugging
-list_channels() {
-    local session_name="$1"
-    local ssh_host=""
-    local base_session_name="$session_name"
-
-    # Check if session name contains host prefix (host:session format)
-    if [[ "$session_name" =~ ^([^:]+):(.+)$ ]]; then
-        ssh_host="${BASH_REMATCH[1]}"
-        base_session_name="${BASH_REMATCH[2]}"
-
-        echo "Listing channels for remote session '$base_session_name' on $ssh_host..."
-
-        if ! establish_ssh_control_master "$ssh_host"; then
-            echo -e "${RED}Failed to establish SSH connection${NC}"
-            exit 1
-        fi
-
-        ssh_exec "$ssh_host" "nvim-screen -channels '$base_session_name'"
-        return $?
-    fi
-
-    # Not in host:session format, check locally
-    local socket_path
-    socket_path=$(get_socket_path "$session_name")
-
-    if [[ -S "$socket_path" ]]; then
-        echo "Listing channels for session: $session_name"
-        echo
-
-        # Get channel count
-        echo "Number of channels:"
-        nvim --headless --server "$socket_path" --remote-expr \
-            'luaeval("#vim.api.nvim_list_chans()")' 2>&1
-
-        echo
-        echo "Channel details (JSON format):"
-        nvim --headless --server "$socket_path" --remote-expr \
-            'luaeval("vim.json.encode(vim.api.nvim_list_chans())")' 2>&1 | jq '.' 2>/dev/null || cat
-
-        echo
-        echo "Channel summary:"
-        nvim --headless --server "$socket_path" --remote-expr \
-            'execute("lua for _, c in ipairs(vim.api.nvim_list_chans()) do print(string.format(\"ID: %d, Mode: %s\", c.id, c.mode or \"none\")) end")' 2>&1
-        return
-    fi
-
-    # Check if this is a remote session
-    ssh_host=$(find_remote_session "$session_name")
-
-    if [[ -n "$ssh_host" ]]; then
-        # For remote session, execute channels command on remote host
-        echo "Listing channels for remote session '$session_name' on $ssh_host..."
-
-        ssh_exec "$ssh_host" "nvim-screen -channels '$session_name'"
-        return $?
-    fi
-
-    echo -e "${RED}Error: Session '$session_name' not found.${NC}"
-    exit 1
-}
-
 # Function to detach from a session (close all UI clients)
 detach_session() {
     local session_name="$1"
@@ -494,91 +432,6 @@ LUA
     exit 1
 }
 
-# Function to kill/terminate a session
-kill_session() {
-    local session_name="$1"
-    local ssh_host=""
-    local base_session_name="$session_name"
-
-    # Check if session name contains host prefix (host:session format)
-    if [[ "$session_name" =~ ^([^:]+):(.+)$ ]]; then
-        ssh_host="${BASH_REMATCH[1]}"
-        base_session_name="${BASH_REMATCH[2]}"
-
-        echo "Terminating remote session '$base_session_name' on $ssh_host..."
-
-        if ! establish_ssh_control_master "$ssh_host"; then
-            echo -e "${RED}Failed to establish SSH connection${NC}"
-            exit 1
-        fi
-
-        # Kill remote session
-        if ssh_exec "$ssh_host" "nvim-screen -d '$base_session_name'"; then
-            echo -e "${GREEN}Remote session terminated successfully${NC}"
-            return 0
-        else
-            echo -e "${RED}Failed to terminate remote session${NC}"
-            return 1
-        fi
-    fi
-
-    # Not in host:session format, check locally
-    local socket_path
-    socket_path=$(get_socket_path "$session_name")
-
-    if [[ -S "$socket_path" ]]; then
-        echo "Terminating session: $session_name"
-
-        # Try graceful quit via nvim remote-send
-        if nvim --headless --server "$socket_path" --remote-send '<C-\><C-N>:qa<CR>' 2>/dev/null; then
-            # Wait a bit for the session to close
-            sleep 0.5
-
-            # Check if the session closed successfully
-            if [[ ! -S "$socket_path" ]]; then
-                echo -e "${GREEN}Session terminated successfully${NC}"
-                return 0
-            elif ! check_socket_health "$socket_path"; then
-                echo -e "${GREEN}Session terminated (socket cleanup pending)${NC}"
-                # Clean up unresponsive socket
-                rm -f "$socket_path"
-                return 0
-            else
-                echo -e "${YELLOW}Warning: Session still running (may have unsaved changes)${NC}"
-                return 1
-            fi
-        else
-            echo -e "${RED}Failed to send quit command to session${NC}"
-            # Try to clean up stale socket
-            if ! check_socket_health "$socket_path"; then
-                echo "Cleaning up unresponsive socket..."
-                rm -f "$socket_path"
-            fi
-            return 1
-        fi
-    fi
-
-    # Check if this is a remote session
-    ssh_host=$(find_remote_session "$session_name")
-
-    if [[ -n "$ssh_host" ]]; then
-        # For remote session, execute kill on remote host
-        echo "Terminating remote session '$session_name' on $ssh_host..."
-
-        # Kill remote session
-        if ssh_exec "$ssh_host" "nvim-screen -d '$session_name'"; then
-            echo -e "${GREEN}Remote session terminated successfully${NC}"
-            return 0
-        else
-            echo -e "${RED}Failed to terminate remote session${NC}"
-            return 1
-        fi
-    fi
-
-    echo -e "${RED}Error: Session '$session_name' not found.${NC}"
-    exit 1
-}
-
 # Function to clean up stale sockets
 cleanup_stale_sockets() {
     local cleaned=0
@@ -632,7 +485,6 @@ Options:
   -ls, -list     List all active sessions (local and remote)
   -r [name]      Attach to session (if name not specified, attach to last or prompt)
   -d <name>      Detach/terminate the specified session
-  -channels <name>  List channels for debugging (shows RPC connections)
   -wipe          Clean up stale/dead sessions
   -v, --version  Show version information
   -h, --help     Show this help message
@@ -705,17 +557,6 @@ main() {
                     shift
                 else
                     echo -e "${RED}Error: -d requires a session name${NC}"
-                    exit 1
-                fi
-                ;;
-            -channels)
-                action="channels"
-                shift
-                if [[ $# -gt 0 ]]; then
-                    session_name="$1"
-                    shift
-                else
-                    echo -e "${RED}Error: -channels requires a session name${NC}"
                     exit 1
                 fi
                 ;;
@@ -814,9 +655,6 @@ main() {
             ;;
         detach)
             detach_session "$session_name"
-            ;;
-        channels)
-            list_channels "$session_name"
             ;;
         wipe)
             cleanup_stale_sockets
