@@ -113,7 +113,6 @@ The init script is pure Lua with full access to Neovim's API. Add any custom ini
 ## Coming soon
 
 - Remote session support with easy port forwarding
-- Zsh completion
 
 ## Philosophy
 
