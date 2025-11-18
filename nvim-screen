@@ -328,6 +328,12 @@ attach_session() {
             exit 1
         fi
 
+        # Verify session exists on remote before attempting to attach
+        if ! ssh_exec "$ssh_host" "[ -S \"\${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-\$USER/nvim-session-$base_session_name.sock\" ]" 2>/dev/null; then
+            echo -e "${RED}Error: Session '$base_session_name' not found on $ssh_host${NC}"
+            exit 1
+        fi
+
         # Attach to remote session via SSH with pseudo-terminal
         exec ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
             "nvim-screen -r '$base_session_name'"
@@ -348,6 +354,12 @@ attach_session() {
 
     if [[ -n "$ssh_host" ]]; then
         echo "Found session '$session_name' on $ssh_host, attaching..."
+
+        # Establish SSH control master if not already active (should already be active from find_remote_session)
+        if ! establish_ssh_control_master "$ssh_host"; then
+            echo -e "${RED}Failed to establish SSH connection to $ssh_host${NC}"
+            exit 1
+        fi
 
         # Attach to remote session via SSH with pseudo-terminal
         exec ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
