@@ -73,8 +73,9 @@ parse_session_name() {
 # Function to check if SSH control master is active
 check_ssh_control_master() {
     local control_path="$1"
-    local ssh_host="$2"
-    ssh -O check -S "$control_path" "$ssh_host" 2>&1 | grep -q "Master running"
+    # Hostname is not actually needed - the socket contains the connection info
+    # Using a dummy value since SSH ignores it when using control master
+    ssh -O check -S "$control_path" dummy 2>&1 | grep -q "Master running"
     return $?
 }
 
@@ -85,7 +86,7 @@ establish_ssh_control_master() {
     control_path=$(get_ssh_control_path "$ssh_host")
 
     # Check if control master already exists and is working
-    if [[ -S "$control_path" ]] && check_ssh_control_master "$control_path" "$ssh_host"; then
+    if [[ -S "$control_path" ]] && check_ssh_control_master "$control_path"; then
         return 0
     fi
 
@@ -103,7 +104,7 @@ establish_ssh_control_master() {
 
     # Verify the control master is working
     sleep 0.5
-    if check_ssh_control_master "$control_path" "$ssh_host"; then
+    if check_ssh_control_master "$control_path"; then
         return 0
     else
         echo -e "${RED}SSH control master established but not responding${NC}"
@@ -118,7 +119,8 @@ close_ssh_control_master() {
     control_path=$(get_ssh_control_path "$ssh_host")
 
     if [[ -S "$control_path" ]]; then
-        ssh -O exit -S "$control_path" "$ssh_host" &>/dev/null
+        # Hostname not needed - socket contains connection info
+        ssh -O exit -S "$control_path" dummy &>/dev/null
         rm -f "$control_path"
     fi
 }
@@ -130,7 +132,9 @@ ssh_exec() {
     local control_path
     control_path=$(get_ssh_control_path "$ssh_host")
 
-    ssh -S "$control_path" "$ssh_host" "$@"
+    # Hostname not needed - socket contains connection info
+    # But we still accept it as parameter for backwards compatibility
+    ssh -S "$control_path" dummy "$@"
 }
 
 # Function to check if nvim-screen is installed on remote
