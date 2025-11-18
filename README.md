@@ -27,6 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/tijoseymathew/nvim-screen/main/inst
 This installs:
 - `nvim-screen` to `~/.local/bin/`
 - Default config to `~/.config/nvim-screen/init.lua`
+- Bash completions to `~/.local/share/bash-completion/completions/`
 
 **Manual installation:**
 
@@ -104,10 +105,15 @@ The init script is pure Lua with full access to Neovim's API. Add any custom ini
 - Neovim 0.9+ (for `--remote-ui` and client-server features)
 - Bash
 
+## Features
+
+- Bash completions for commands and session names
+- Tab completion for SSH hosts from your SSH config
+
 ## Coming soon
 
 - Remote session support with easy port forwarding
-- Shell completion (bash/zsh)
+- Zsh completion
 
 ## Philosophy
 
