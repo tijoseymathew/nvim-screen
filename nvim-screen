@@ -348,24 +348,6 @@ attach_session() {
         exec nvim --server "$socket_path" --remote-ui
     fi
 
-    # Not found locally, search remote hosts
-    echo "Session not found locally, searching remote hosts..."
-    ssh_host=$(find_remote_session "$session_name")
-
-    if [[ -n "$ssh_host" ]]; then
-        echo "Found session '$session_name' on $ssh_host, attaching..."
-
-        # Establish SSH control master if not already active (should already be active from find_remote_session)
-        if ! establish_ssh_control_master "$ssh_host"; then
-            echo -e "${RED}Failed to establish SSH connection to $ssh_host${NC}"
-            exit 1
-        fi
-
-        # Attach to remote session via SSH with pseudo-terminal
-        exec ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
-            "nvim-screen -r '$session_name'"
-    fi
-
     # Not found anywhere
     echo -e "${RED}Error: Session '$session_name' not found.${NC}"
     echo
