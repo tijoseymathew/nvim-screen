@@ -149,6 +149,38 @@ ssh_exec() {
     ssh -S "$control_path" dummy "$@"
 }
 
+# Function to run interactive session with command interception
+run_interactive_session() {
+    local ssh_host="$1"
+    local session_name="$2"
+    local control_path
+    control_path=$(get_ssh_control_path "$ssh_host")
+
+    local ssh_cmd="ssh -t -S \"$control_path\" dummy \"nvim-screen -r '$session_name'\""
+
+    # Use `script` to create a PTY for Neovim's UI, and pipe its raw output
+    # to a `while read` loop for interception.
+    script -q -c "$ssh_cmd" /dev/null | while IFS= read -r line; do
+        # Check for our magic command prefix.
+        if [[ "$line" =~ ^NVIM_SCREEN_CMD::(.+)$ ]]; then
+            # This is a command, not UI output. Parse it.
+            local payload="${BASH_REMATCH[1]}"
+            IFS='::' read -r cmd type spec <<< "$payload"
+
+            echo -e "\r\n${GREEN}[nvim-screen] Received command: $cmd $type $spec${NC}\r"
+
+            if [[ "$cmd" == "FORWARD" && "$type" == "REMOTE" ]]; then
+                ssh -S "$control_path" -O forward -R "$spec" "$ssh_host"
+            elif [[ "$cmd" == "CANCEL" && "$type" == "REMOTE" ]]; then
+                ssh -S "$control_path" -O cancel -R "$spec" "$ssh_host"
+            fi
+        else
+            # This is normal UI output. Print it to the terminal.
+            echo "$line"
+        fi
+    done
+}
+
 # Function to check if nvim-screen is installed on remote
 check_remote_nvim_screen() {
     local ssh_host="$1"
@@ -334,9 +366,9 @@ attach_session() {
             exit 1
         fi
 
-        # Attach to remote session via SSH with pseudo-terminal
-        exec ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
-            "nvim-screen -r '$base_session_name'"
+        # Attach to remote session via interactive wrapper for command interception
+        run_interactive_session "$ssh_host" "$base_session_name"
+        exit 0 # Exit cleanly after the interactive session ends.
     fi
 
     # Not in host:session format, check locally first
