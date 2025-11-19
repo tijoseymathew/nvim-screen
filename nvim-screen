@@ -87,7 +87,8 @@ check_ssh_control_master() {
     local control_path="$1"
     # Hostname is not actually needed - the socket contains the connection info
     # Using a dummy value since SSH ignores it when using control master
-    ssh -O check -S "$control_path" dummy 2>&1 | grep -q "Master running"
+    # Use timeout to prevent hanging - if check takes more than 2 seconds, assume failed
+    timeout 2 ssh -O check -S "$control_path" dummy 2>&1 | grep -q "Master running"
     return $?
 }
 
