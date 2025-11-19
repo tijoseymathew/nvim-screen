@@ -5,6 +5,18 @@
 
 set -euo pipefail
 
+# Terminal cleanup function
+cleanup_terminal() {
+    # Reset terminal to sane state
+    # This runs on exit to fix garbled terminal from crashed/forced-exit sessions
+    stty sane 2>/dev/null || true
+    tput reset 2>/dev/null || true
+    tput cnorm 2>/dev/null || true  # Restore cursor
+}
+
+# Set up trap to clean terminal on any exit
+trap cleanup_terminal EXIT INT TERM HUP
+
 # Configuration
 VERSION="0.1.0"
 USER="${USER:-$(whoami)}"
@@ -290,8 +302,9 @@ start_session() {
 
         # Start remote session via SSH with pseudo-terminal
         # This will execute nvim-screen on the remote host and attach to it
-        exec ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
+        ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
             "nvim-screen -S '$session_name'$nvim_args_str"
+        exit $?
     else
         # Local session - original behavior
         # Get the init script to source
@@ -301,10 +314,12 @@ start_session() {
         # Start nvim with server listening on socket
         if [[ -n "$init_script" ]]; then
             # Source the init script after nvim's standard initialization
-            exec nvim --listen "$socket_path" -S "$init_script" "${nvim_args[@]}"
+            nvim --listen "$socket_path" -S "$init_script" "${nvim_args[@]}"
+            exit $?
         else
             # No init script, just start normally
-            exec nvim --listen "$socket_path" "${nvim_args[@]}"
+            nvim --listen "$socket_path" "${nvim_args[@]}"
+            exit $?
         fi
     fi
 }
@@ -335,8 +350,9 @@ attach_session() {
         fi
 
         # Attach to remote session via SSH with pseudo-terminal
-        exec ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
+        ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
             "nvim-screen -r '$base_session_name'"
+        exit $?
     fi
 
     # Not in host:session format, check locally first
@@ -345,7 +361,8 @@ attach_session() {
 
     if [[ -S "$socket_path" ]]; then
         # Local session - attach to it
-        exec nvim --server "$socket_path" --remote-ui
+        nvim --server "$socket_path" --remote-ui
+        exit $?
     fi
 
     # Not found anywhere
