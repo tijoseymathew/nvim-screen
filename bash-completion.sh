@@ -8,11 +8,12 @@ _nvim_screen_completions() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     # Get session directory
-    local session_dir="${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-${USER}"
+    local user="${USER:-$(whoami)}"
+    local session_dir="${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-${user}"
     local socket_prefix="nvim-session"
 
     # Main options
-    opts="-s -S -ls -list -r -x -d -D -k -kill -sync -socks -wipe -v --version -h --help --"
+    opts="-s -S -c -ls -list -r -x -d -D -k -kill -sync -socks -wipe -v --version -h --help --"
 
     # Handle option-specific completions
     case "${prev}" in
@@ -30,6 +31,35 @@ _nvim_screen_completions() {
             ;;
         -S)
             # No completion for new session names (user provides custom name)
+            return 0
+            ;;
+        -c)
+            # Complete directories; remote ones when -s <host> was given and
+            # its SSH control master is already alive (never prompts)
+            local host="" i
+            for ((i=1; i < COMP_CWORD; i++)); do
+                if [[ "${COMP_WORDS[i]}" == "-s" ]]; then
+                    host="${COMP_WORDS[i+1]:-}"
+                fi
+            done
+            if [[ -n "$host" ]]; then
+                local safe_host="${host//[^a-zA-Z0-9._-]/_}"
+                local control_socket="$session_dir/ssh-control-${safe_host}.sock"
+                if [[ -S "$control_socket" ]] && \
+                    ssh -O check -S "$control_socket" dummy 2>&1 | grep -q "Master running"; then
+                    local remote_dirs
+                    remote_dirs=$(ssh -S "$control_socket" dummy \
+                        "bash -c 'compgen -d -S / -- \"$cur\"'" 2>/dev/null)
+                    COMPREPLY=( $(compgen -W "$remote_dirs" -- "$cur") )
+                fi
+            else
+                COMPREPLY=( $(compgen -d -S / -- "$cur") )
+            fi
+            compopt -o nospace 2>/dev/null
+            return 0
+            ;;
+        -socks)
+            COMPREPLY=( $(compgen -W "off" -- "$cur") )
             return 0
             ;;
         -r|-x|-d|-D|-k|-kill)
