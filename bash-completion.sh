@@ -12,7 +12,7 @@ _nvim_screen_completions() {
     local socket_prefix="nvim-session"
 
     # Main options
-    opts="-s -S -ls -list -r -x -d -D -wipe -v --version -h --help --"
+    opts="-s -S -ls -list -r -x -d -D -k -kill -sync -socks -wipe -v --version -h --help --"
 
     # Handle option-specific completions
     case "${prev}" in
@@ -32,7 +32,7 @@ _nvim_screen_completions() {
             # No completion for new session names (user provides custom name)
             return 0
             ;;
-        -r|-x|-d|-D)
+        -r|-x|-d|-D|-k|-kill)
             # Complete with active session names
             local sessions=""
 
