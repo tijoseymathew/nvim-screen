@@ -56,9 +56,7 @@ nvim-screen there automatically (see below).
 | `nvim-screen -k <name>` | Kill (terminate) session |
 | `nvim-screen -c <dir>` | Start session in a working directory (local or remote) |
 | `nvim-screen -s <host> ...` | Run any of the above on a remote host |
-| `nvim-screen -s <host> -sync` | Push nvim-screen + your Neovim config to host |
-| `nvim-screen -s <host> -socks [port]` | Open a SOCKS5 proxy through host |
-| `nvim-screen -s <host> -socks off` | Close the SOCKS5 proxy |
+| `nvim-screen -s <host> -sync` | Push Neovim, your config, and nvim-screen to host |
 | `nvim-screen -h` | Show help |
 
 Inside Neovim:
@@ -112,34 +110,12 @@ nvim-screen -k user@host:myproj         # kill a remote session
   existing SSH connection — the remote only needs Neovim 0.9+), and it is
   re-pushed whenever the remote version differs from yours
 - `-sync` additionally pushes your `~/.config/nvim` to the host, so your
-  editor config follows you; plugins are installed by your plugin manager on
-  first run
+  editor config follows you (plugins are installed by your plugin manager on
+  first run) — and if the host has no Neovim at all, it installs the official
+  stable build into `~/.local` there, no root required
 - `-c <dir>` sets the session's working directory; when a control master for
   the host is already up, bash completion completes **remote** directories
 - `nvim-screen -ls` lists local sessions and sessions on every connected host
-
-### SOCKS proxy
-
-```bash
-nvim-screen -s user@host -socks         # proxy on a stable per-host port, then attach
-nvim-screen -s user@host -socks 1080    # or pick the port yourself
-nvim-screen -s user@host -socks off     # close the proxy
-```
-
-Opens a SOCKS5 proxy through the host on a dedicated SSH connection (one per
-host — repeat invocations report the active proxy). The default port is
-derived from the host name, so it's **stable across reconnects** — configure a
-browser proxy profile once per host (e.g. with FoxyProxy or SwitchyOmega) and
-switch between your remote environments from the browser. Active proxies show
-up in `nvim-screen -ls` and run independently of your editor sessions until
-`-socks off`.
-
-**Reaching services on the remote itself:** browsers (Chromium especially)
-refuse to send loopback URLs through any proxy, so `http://localhost:3000`
-will not reach the remote's dev server. Use the remote's *hostname* instead
-(e.g. `http://myhost:3000`) with the proxy profile set to resolve DNS through
-the proxy (SOCKS5 remote DNS — FoxyProxy's default). The name resolves on the
-remote, so anything the remote can reach, your browser can.
 
 ## Requirements
 

@@ -6,12 +6,11 @@
 set -euo pipefail
 
 # Configuration
-VERSION="0.3.0"
+VERSION="0.4.0"
 USER="${USER:-$(whoami)}"
 SESSION_DIR="${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-${USER}"
 SOCKET_PREFIX="nvim-session"
 SSH_CONTROL_PREFIX="ssh-control"
-SOCKS_PREFIX="socks"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nvim-screen"
 
 # Remote invocations must not rely on the login shell's PATH: non-interactive
@@ -49,25 +48,6 @@ sanitize_host() {
 get_ssh_control_path() {
     local ssh_host="$1"
     echo "$SESSION_DIR/${SSH_CONTROL_PREFIX}-$(sanitize_host "$ssh_host").sock"
-}
-
-# Function to get the file recording an active SOCKS proxy port for a host
-get_socks_port_file() {
-    local ssh_host="$1"
-    echo "$SESSION_DIR/${SOCKS_PREFIX}-$(sanitize_host "$ssh_host").port"
-}
-
-# Function to get the control socket of a host's dedicated SOCKS connection
-get_socks_control_path() {
-    local ssh_host="$1"
-    echo "$SESSION_DIR/${SOCKS_PREFIX}-$(sanitize_host "$ssh_host").sock"
-}
-
-# Function to check whether a host's SOCKS proxy is up
-socks_proxy_active() {
-    local socks_control
-    socks_control=$(get_socks_control_path "$1")
-    [[ -S "$socks_control" ]] && check_ssh_control_master "$socks_control"
 }
 
 # Function to get hostname from SSH control socket path
@@ -179,17 +159,6 @@ terminate_ssh_master() {
     rm -f "$control_path"
 }
 
-# Function to close SSH control master
-close_ssh_control_master() {
-    local ssh_host="$1"
-    local control_path
-    control_path=$(get_ssh_control_path "$ssh_host")
-
-    if [[ -S "$control_path" ]]; then
-        terminate_ssh_master "$control_path"
-    fi
-}
-
 # Function to execute command via SSH using control master
 ssh_exec() {
     local ssh_host="$1"
@@ -215,7 +184,8 @@ bootstrap_remote() {
     local self="${BASH_SOURCE[0]}"
 
     if ! ssh_exec "$ssh_host" "$REMOTE_PATH command -v nvim" &>/dev/null; then
-        echo -e "${RED}Error: nvim not found on $ssh_host. Install Neovim 0.9+ there first.${NC}"
+        echo -e "${RED}Error: nvim not found on $ssh_host.${NC}"
+        echo "Run '$(basename "$0") -s $ssh_host -sync' to install Neovim there."
         return 1
     fi
 
@@ -232,9 +202,68 @@ bootstrap_remote() {
     echo -e "${GREEN}nvim-screen installed on $ssh_host${NC}"
 }
 
-# Function to sync nvim-screen and the local Neovim config to a remote host
+# Function to install Neovim itself on a remote host (official stable
+# build into ~/.local, no root required)
+install_remote_nvim() {
+    local ssh_host="$1"
+    local os arch asset
+    os=$(ssh_exec "$ssh_host" 'uname -s' 2>/dev/null)
+    arch=$(ssh_exec "$ssh_host" 'uname -m' 2>/dev/null)
+
+    case "$os-$arch" in
+        Linux-x86_64)           asset="nvim-linux-x86_64" ;;
+        Linux-aarch64|Linux-arm64) asset="nvim-linux-arm64" ;;
+        Darwin-x86_64)          asset="nvim-macos-x86_64" ;;
+        Darwin-arm64)           asset="nvim-macos-arm64" ;;
+        *)
+            echo -e "${RED}Error: No prebuilt Neovim for $os/$arch. Install nvim on $ssh_host manually.${NC}"
+            return 1
+            ;;
+    esac
+
+    # NVIM_SCREEN_NVIM_URL overrides the download source (mirrors, air-gapped)
+    local url="${NVIM_SCREEN_NVIM_URL:-https://github.com/neovim/neovim/releases/download/stable/${asset}.tar.gz}"
+
+    echo "Installing Neovim (stable, $asset) on $ssh_host..."
+    if ! ssh_exec "$ssh_host" "
+        set -e
+        url='$url'
+        tmp=\$(mktemp /tmp/nvim-stable.XXXXXX.tar.gz)
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL \"\$url\" -o \"\$tmp\"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -qO \"\$tmp\" \"\$url\"
+        else
+            echo 'Error: neither curl nor wget available on remote' >&2
+            exit 1
+        fi
+        mkdir -p \"\$HOME/.local/opt\" \"\$HOME/.local/bin\"
+        rm -rf \"\$HOME/.local/opt/${asset}\"
+        tar -xzf \"\$tmp\" -C \"\$HOME/.local/opt\"
+        rm -f \"\$tmp\"
+        ln -sf \"\$HOME/.local/opt/${asset}/bin/nvim\" \"\$HOME/.local/bin/nvim\"
+    "; then
+        echo -e "${RED}Failed to install Neovim on $ssh_host${NC}"
+        return 1
+    fi
+
+    local nvim_version
+    nvim_version=$(ssh_exec "$ssh_host" "$REMOTE_PATH nvim --version" 2>/dev/null | head -1 || true)
+    if [[ -z "$nvim_version" ]]; then
+        echo -e "${RED}Neovim installed but not runnable on $ssh_host${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}Installed $nvim_version on $ssh_host${NC}"
+}
+
+# Function to sync nvim-screen and the local Neovim config to a remote host,
+# installing Neovim itself if the remote doesn't have it
 sync_remote() {
     local ssh_host="$1"
+
+    if ! ssh_exec "$ssh_host" "$REMOTE_PATH command -v nvim" &>/dev/null; then
+        install_remote_nvim "$ssh_host" || return 1
+    fi
 
     bootstrap_remote "$ssh_host" || return 1
 
@@ -247,80 +276,6 @@ sync_remote() {
     else
         echo "No local Neovim config at $config_home/nvim, skipping config sync."
     fi
-}
-
-# Function to compute a stable per-host SOCKS port so browser proxy
-# profiles can be configured once per host
-default_socks_port() {
-    local ssh_host="$1"
-    local sum
-    sum=$(printf '%s' "$ssh_host" | cksum)
-    echo $((10800 + ${sum%% *} % 200))
-}
-
-# Function to open a SOCKS5 proxy through a host. The proxy runs on its own
-# SSH connection (not the shared control master): dynamic forwards on a
-# shared master cannot be removed again (ssh -O cancel silently fails), so
-# the proxy gets a dedicated master that -socks off can terminate. This also
-# makes its lifecycle independent of the editor connection.
-enable_socks_proxy() {
-    local ssh_host="$1"
-    local port="$2"
-    local socks_control port_file
-    socks_control=$(get_socks_control_path "$ssh_host")
-    port_file=$(get_socks_port_file "$ssh_host")
-
-    # Only one proxy per host: report the active one instead of stacking
-    if socks_proxy_active "$ssh_host"; then
-        local active_port
-        active_port=$(cat "$port_file" 2>/dev/null || echo "?")
-        if [[ -n "$port" ]] && [[ "$port" != "$active_port" ]]; then
-            echo -e "${YELLOW}SOCKS proxy for $ssh_host already on localhost:$active_port.${NC}"
-            echo "Run '$(basename "$0") -s $ssh_host -socks off' first to change the port."
-        else
-            echo -e "${GREEN}SOCKS proxy for $ssh_host already on localhost:$active_port${NC}"
-        fi
-        return 0
-    fi
-
-    rm -f "$socks_control" "$port_file"
-
-    if [[ -z "$port" ]]; then
-        port=$(default_socks_port "$ssh_host")
-    fi
-
-    if ssh -fNM -S "$socks_control" \
-        -o ExitOnForwardFailure=yes \
-        -o ServerAliveInterval=60 \
-        -o ServerAliveCountMax=3 \
-        -D "127.0.0.1:$port" "$ssh_host"; then
-        echo "$port" > "$port_file"
-        echo -e "${GREEN}SOCKS proxy for $ssh_host on localhost:$port${NC}"
-        echo "Point a browser SOCKS5 proxy profile at localhost:$port to browse via $ssh_host."
-    else
-        echo -e "${RED}Failed to open SOCKS proxy for $ssh_host on port $port${NC}"
-        return 1
-    fi
-}
-
-# Function to close the SOCKS proxy for a host
-disable_socks_proxy() {
-    local ssh_host="$1"
-    local socks_control port_file
-    socks_control=$(get_socks_control_path "$ssh_host")
-    port_file=$(get_socks_port_file "$ssh_host")
-
-    if ! socks_proxy_active "$ssh_host"; then
-        echo -e "${YELLOW}No SOCKS proxy active for $ssh_host${NC}"
-        rm -f "$socks_control" "$port_file"
-        return 0
-    fi
-
-    local port
-    port=$(cat "$port_file" 2>/dev/null || echo "?")
-    terminate_ssh_master "$socks_control"
-    rm -f "$port_file"
-    echo -e "${GREEN}SOCKS proxy for $ssh_host on localhost:$port closed${NC}"
 }
 
 # Function to generate a session name
@@ -417,24 +372,6 @@ list_sessions() {
     if [[ "$has_sessions" == false ]]; then
         echo "  No active sessions"
     fi
-
-    # Show active SOCKS proxies
-    local shown_socks=false
-    for port_file in "$SESSION_DIR"/${SOCKS_PREFIX}-*.port; do
-        if [[ -f "$port_file" ]]; then
-            local safe_host="${port_file##*/}"
-            safe_host="${safe_host#${SOCKS_PREFIX}-}"
-            safe_host="${safe_host%.port}"
-            if socks_proxy_active "$safe_host"; then
-                if [[ "$shown_socks" == false ]]; then
-                    echo
-                    echo "SOCKS proxies:"
-                    shown_socks=true
-                fi
-                echo -e "  ${GREEN}⇄${NC} $safe_host on localhost:$(cat "$port_file")"
-            fi
-        fi
-    done
     echo
 }
 
@@ -695,21 +632,7 @@ cleanup_stale_sockets() {
             # Check if control master is still active
             if ! check_ssh_control_master "$control_socket" 2>/dev/null; then
                 echo "Removing stale SSH control socket: ${control_socket##*/}"
-                rm -f "$control_socket"
-                cleaned=$((cleaned + 1))
-            fi
-        fi
-    done
-
-    # Clean up records of SOCKS proxies that are no longer running
-    for port_file in "$SESSION_DIR"/${SOCKS_PREFIX}-*.port; do
-        if [[ -f "$port_file" ]]; then
-            local safe_host="${port_file##*/}"
-            safe_host="${safe_host#${SOCKS_PREFIX}-}"
-            safe_host="${safe_host%.port}"
-            if ! socks_proxy_active "$safe_host"; then
-                echo "Removing stale SOCKS record: ${port_file##*/}"
-                rm -f "$port_file" "$(get_socks_control_path "$safe_host")"
+                terminate_ssh_master "$control_socket"
                 cleaned=$((cleaned + 1))
             fi
         fi
@@ -742,10 +665,8 @@ Options:
   -r [name]          Attach to session (if name not specified, attach to last or prompt)
   -d <name>          Detach all clients from the specified session
   -k <name>          Kill (terminate) the specified session
-  -sync              Sync nvim-screen and your Neovim config to the remote (with -s)
-  -socks [port|off]  Open (or close) a SOCKS5 proxy through the remote (with -s);
-                     the default port is stable per host so browser proxy
-                     profiles work unchanged across reconnects
+  -sync              Sync nvim-screen and your Neovim config to the remote,
+                     installing Neovim there if it's missing (with -s)
   -wipe              Clean up stale/dead sessions
   -v, --version      Show version information
   -h, --help         Show this help message
@@ -757,9 +678,7 @@ Examples:
   $(basename $0) -s user@host -S remote-proj     # Start session on remote host
   $(basename $0) -s user@host -c ~/work/proj     # Remote session in ~/work/proj
   $(basename $0) -s user@host -ls                # List sessions on remote host
-  $(basename $0) -s user@host -sync              # Push nvim-screen + nvim config to host
-  $(basename $0) -s user@host -socks             # SOCKS5 proxy via host, then attach
-  $(basename $0) -s user@host -socks off         # Close the SOCKS5 proxy
+  $(basename $0) -s user@host -sync              # Push nvim + config + nvim-screen to host
   $(basename $0) -r host:session                 # Attach to remote session
   $(basename $0) -- -O file1.txt file2.txt       # Start session with vertical split
   $(basename $0) -S test -- -c 'set number'      # Start session with nvim command
@@ -780,8 +699,6 @@ main() {
     local ssh_host=""
     local workdir=""
     local do_sync=false
-    local socks_mode=""
-    local socks_port=""
     local nvim_args=()
 
     # Parse command line arguments
@@ -856,17 +773,6 @@ main() {
                 do_sync=true
                 shift
                 ;;
-            -socks)
-                socks_mode="on"
-                shift
-                if [[ $# -gt 0 ]] && [[ "$1" == "off" ]]; then
-                    socks_mode="off"
-                    shift
-                elif [[ $# -gt 0 ]] && [[ "$1" =~ ^[0-9]+$ ]]; then
-                    socks_port="$1"
-                    shift
-                fi
-                ;;
             -wipe)
                 action="wipe"
                 shift
@@ -894,18 +800,16 @@ main() {
         esac
     done
 
-    # -sync and -socks only make sense against a remote host
-    if [[ -z "$ssh_host" ]] && { [[ "$do_sync" == true ]] || [[ -n "$socks_mode" ]]; }; then
-        echo -e "${RED}Error: -sync and -socks require -s <host>${NC}"
+    # -sync only makes sense against a remote host
+    if [[ -z "$ssh_host" ]] && [[ "$do_sync" == true ]]; then
+        echo -e "${RED}Error: -sync requires -s <host>${NC}"
         exit 1
     fi
 
-    # Default action: start a session. Only pure maintenance invocations
-    # (-sync or -socks off with nothing else to do) skip that.
+    # Default action: start a session, unless the invocation was only about
+    # syncing the remote
     if [[ -z "$action" ]]; then
-        if [[ -n "$ssh_host" ]] && [[ ${#nvim_args[@]} -eq 0 ]] \
-            && { [[ "$do_sync" == true ]] || [[ "$socks_mode" == "off" ]]; } \
-            && [[ "$socks_mode" != "on" ]]; then
+        if [[ "$do_sync" == true ]] && [[ ${#nvim_args[@]} -eq 0 ]]; then
             action="none"
         else
             action="start"
@@ -923,38 +827,26 @@ main() {
 
     # Handle SSH connection if specified
     if [[ -n "$ssh_host" ]]; then
-        # The SOCKS proxy runs on its own connection; turning it off never
-        # needs the main control master
-        if [[ "$socks_mode" == "off" ]]; then
-            disable_socks_proxy "$ssh_host"
+        echo "Establishing SSH connection to $ssh_host..."
+        if ! establish_ssh_control_master "$ssh_host"; then
+            exit 1
         fi
 
-        if [[ "$action" != "none" ]] || [[ "$do_sync" == true ]]; then
-            echo "Establishing SSH connection to $ssh_host..."
-            if ! establish_ssh_control_master "$ssh_host"; then
-                exit 1
-            fi
-
-            if [[ "$do_sync" == true ]]; then
-                sync_remote "$ssh_host" || exit 1
-            else
-                # Install nvim-screen on the remote if it's missing, and keep
-                # it in step with the local version
-                local remote_version
-                remote_version=$(remote_screen "$ssh_host" "-v" 2>/dev/null | awk '{print $NF}' || true)
-                if [[ "$remote_version" != "$VERSION" ]]; then
-                    if [[ -z "$remote_version" ]]; then
-                        echo -e "${YELLOW}nvim-screen not found on $ssh_host${NC}"
-                    else
-                        echo -e "${YELLOW}Updating nvim-screen on $ssh_host ($remote_version -> $VERSION)${NC}"
-                    fi
-                    bootstrap_remote "$ssh_host" || exit 1
+        if [[ "$do_sync" == true ]]; then
+            sync_remote "$ssh_host" || exit 1
+        else
+            # Install nvim-screen on the remote if it's missing, and keep
+            # it in step with the local version
+            local remote_version
+            remote_version=$(remote_screen "$ssh_host" "-v" 2>/dev/null | awk '{print $NF}' || true)
+            if [[ "$remote_version" != "$VERSION" ]]; then
+                if [[ -z "$remote_version" ]]; then
+                    echo -e "${YELLOW}nvim-screen not found on $ssh_host${NC}"
+                else
+                    echo -e "${YELLOW}Updating nvim-screen on $ssh_host ($remote_version -> $VERSION)${NC}"
                 fi
+                bootstrap_remote "$ssh_host" || exit 1
             fi
-        fi
-
-        if [[ "$socks_mode" == "on" ]]; then
-            enable_socks_proxy "$ssh_host" "$socks_port" || exit 1
         fi
     fi
 

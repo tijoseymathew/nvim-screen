@@ -13,7 +13,7 @@ _nvim_screen_completions() {
     local socket_prefix="nvim-session"
 
     # Main options
-    opts="-s -S -c -ls -list -r -x -d -D -k -kill -sync -socks -wipe -v --version -h --help --"
+    opts="-s -S -c -ls -list -r -x -d -D -k -kill -sync -wipe -v --version -h --help --"
 
     # Handle option-specific completions
     case "${prev}" in
@@ -56,10 +56,6 @@ _nvim_screen_completions() {
                 COMPREPLY=( $(compgen -d -S / -- "$cur") )
             fi
             compopt -o nospace 2>/dev/null
-            return 0
-            ;;
-        -socks)
-            COMPREPLY=( $(compgen -W "off" -- "$cur") )
             return 0
             ;;
         -r|-x|-d|-D|-k|-kill)
