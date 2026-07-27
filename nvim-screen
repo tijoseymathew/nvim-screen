@@ -2,11 +2,16 @@
 
 # Neovim Session Manager - mimics GNU screen interface
 # Usage similar to screen: nvim-screen [-S name] [-ls] [-r [name]] [-d name] [-k name]
+#
+# Portability: targets bash 3.2 (macOS default shell). No mapfile/readarray,
+# no associative arrays, and empty arrays are expanded with the
+# ${arr[@]+"${arr[@]}"} idiom because bash < 4.4 treats "${arr[@]}" on an
+# empty array as an unbound variable under 'set -u'.
 
 set -euo pipefail
 
 # Configuration
-VERSION="0.4.0"
+VERSION="0.4.1"
 USER="${USER:-$(whoami)}"
 SESSION_DIR="${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-${USER}"
 SOCKET_PREFIX="nvim-session"
@@ -60,28 +65,28 @@ get_host_from_control_path() {
     echo "$safe_host"
 }
 
-# Function to get all active SSH hosts
+# Function to get all active SSH hosts, one per line
 get_active_ssh_hosts() {
-    local hosts=()
+    local control_socket host
     for control_socket in "$SESSION_DIR"/${SSH_CONTROL_PREFIX}-*.sock; do
         if [[ -S "$control_socket" ]]; then
-            local host
             host=$(get_host_from_control_path "$control_socket")
             if check_ssh_control_master "$control_socket" 2>/dev/null; then
-                hosts+=("$host")
+                echo "$host"
             fi
         fi
     done
-    printf '%s\n' "${hosts[@]}"
 }
 
 # Function to find which remote host has a session
 find_remote_session() {
     local session_name="$1"
-    local hosts
-    mapfile -t hosts < <(get_active_ssh_hosts)
+    local hosts=() host
+    while IFS= read -r host; do
+        hosts+=("$host")
+    done < <(get_active_ssh_hosts)
 
-    for host in "${hosts[@]}"; do
+    for host in ${hosts[@]+"${hosts[@]}"}; do
         # Check if session exists on this host
         if ssh_exec "$host" "[ -S \"\${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-\$USER/nvim-session-$session_name.sock\" ]" 2>/dev/null; then
             echo "$host"
@@ -228,7 +233,9 @@ install_remote_nvim() {
     if ! ssh_exec "$ssh_host" "
         set -e
         url='$url'
-        tmp=\$(mktemp /tmp/nvim-stable.XXXXXX.tar.gz)
+        # BSD mktemp rejects templates with a suffix after the X's; tar
+        # doesn't need the .tar.gz extension anyway
+        tmp=\$(mktemp \"\${TMPDIR:-/tmp}/nvim-stable.XXXXXX\")
         if command -v curl >/dev/null 2>&1; then
             curl -fsSL \"\$url\" -o \"\$tmp\"
         elif command -v wget >/dev/null 2>&1; then
@@ -340,10 +347,12 @@ list_sessions() {
     done
 
     # List sessions on all active remote hosts
-    local hosts
-    mapfile -t hosts < <(get_active_ssh_hosts)
+    local hosts=() host
+    while IFS= read -r host; do
+        hosts+=("$host")
+    done < <(get_active_ssh_hosts)
 
-    for host in "${hosts[@]}"; do
+    for host in ${hosts[@]+"${hosts[@]}"}; do
         if [[ -n "$host" ]]; then
             # Get remote sessions
             local remote_sessions
@@ -397,7 +406,9 @@ start_session() {
     local ssh_host="$2"
     local workdir="$3"
     shift 3
-    local nvim_args=("$@")
+    # ${1+"$@"}: bash < 4.4 errors on "$@" under 'set -u' when there are
+    # no positional parameters
+    local nvim_args=(${1+"$@"})
     local socket_path
     socket_path=$(get_socket_path "$session_name")
 
@@ -438,7 +449,7 @@ start_session() {
     if [[ -n "$init_script" ]]; then
         server_cmd+=(-S "$init_script")
     fi
-    server_cmd+=("${nvim_args[@]}")
+    server_cmd+=(${nvim_args[@]+"${nvim_args[@]}"})
 
     if command -v setsid &>/dev/null; then
         NVIM_SCREEN_SESSION="$session_name" setsid "${server_cmd[@]}" </dev/null &>/dev/null &
@@ -655,7 +666,7 @@ show_usage() {
     cat << EOF
 Neovim Session Manager - GNU screen-like interface for Neovim
 
-Usage: $(basename $0) [options] [command] [-- nvim_args...]
+Usage: $(basename "$0") [options] [command] [-- nvim_args...]
 
 Options:
   -s <host>          Connect to remote host via SSH (auto-installs nvim-screen there)
@@ -673,15 +684,15 @@ Options:
   --                 Pass all following arguments to nvim
 
 Examples:
-  $(basename $0) -S myproject                    # Start new session named 'myproject'
-  $(basename $0) -S myproject -- file.txt        # Start session and open file.txt
-  $(basename $0) -s user@host -S remote-proj     # Start session on remote host
-  $(basename $0) -s user@host -c ~/work/proj     # Remote session in ~/work/proj
-  $(basename $0) -s user@host -ls                # List sessions on remote host
-  $(basename $0) -s user@host -sync              # Push nvim + config + nvim-screen to host
-  $(basename $0) -r host:session                 # Attach to remote session
-  $(basename $0) -- -O file1.txt file2.txt       # Start session with vertical split
-  $(basename $0) -S test -- -c 'set number'      # Start session with nvim command
+  $(basename "$0") -S myproject                    # Start new session named 'myproject'
+  $(basename "$0") -S myproject -- file.txt        # Start session and open file.txt
+  $(basename "$0") -s user@host -S remote-proj     # Start session on remote host
+  $(basename "$0") -s user@host -c ~/work/proj     # Remote session in ~/work/proj
+  $(basename "$0") -s user@host -ls                # List sessions on remote host
+  $(basename "$0") -s user@host -sync              # Push nvim + config + nvim-screen to host
+  $(basename "$0") -r host:session                 # Attach to remote session
+  $(basename "$0") -- -O file1.txt file2.txt       # Start session with vertical split
+  $(basename "$0") -S test -- -c 'set number'      # Start session with nvim command
 
 Inside Neovim:
   :q (and :qa, ZZ, ...)    Detach when the quit would end the session
@@ -788,7 +799,7 @@ main() {
             --)
                 # Everything after -- is passed to nvim
                 shift
-                nvim_args=("$@")
+                nvim_args=(${1+"$@"})
                 break
                 ;;
             *)
@@ -865,7 +876,7 @@ main() {
                     session_name=$(generate_session_name)
                 fi
             fi
-            start_session "$session_name" "$ssh_host" "$workdir" "${nvim_args[@]}"
+            start_session "$session_name" "$ssh_host" "$workdir" ${nvim_args[@]+"${nvim_args[@]}"}
             ;;
         attach)
             if [[ -z "$session_name" ]]; then
@@ -916,4 +927,4 @@ main() {
     esac
 }
 
-main "$@"
+main ${1+"$@"}
