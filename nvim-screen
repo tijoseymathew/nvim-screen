@@ -10,6 +10,18 @@
 
 set -euo pipefail
 
+# Terminal cleanup function
+cleanup_terminal() {
+    # Reset terminal to sane state
+    # This runs on exit to fix garbled terminal from crashed/forced-exit sessions
+    stty sane 2>/dev/null || true
+    tput reset 2>/dev/null || true
+    tput cnorm 2>/dev/null || true  # Restore cursor
+}
+
+# Set up trap to clean terminal on any exit
+trap cleanup_terminal EXIT INT TERM HUP
+
 # Configuration
 VERSION="0.4.1"
 USER="${USER:-$(whoami)}"
@@ -102,7 +114,8 @@ check_ssh_control_master() {
     local control_path="$1"
     # Hostname is not actually needed - the socket contains the connection info
     # Using a dummy value since SSH ignores it when using control master
-    ssh -O check -S "$control_path" dummy 2>&1 | grep -q "Master running"
+    # Use timeout to prevent hanging - if check takes more than 2 seconds, assume failed
+    timeout 2 ssh -O check -S "$control_path" dummy 2>&1 | grep -q "Master running"
     return $?
 }
 
@@ -430,7 +443,8 @@ start_session() {
 
         # Start remote session via SSH with pseudo-terminal
         # This will execute nvim-screen on the remote host and attach to it
-        exec ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy "$remote_cmd"
+        ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy "$remote_cmd"
+        exit $?
     fi
 
     if [[ -S "$socket_path" ]]; then
@@ -498,8 +512,9 @@ attach_session() {
         fi
 
         # Attach to remote session via SSH with pseudo-terminal
-        exec ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
+        ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
             "$REMOTE_PATH nvim-screen -r '$base_session_name'"
+        exit $?
     fi
 
     # Not in host:session format, check locally first
