@@ -23,7 +23,7 @@ cleanup_terminal() {
 trap cleanup_terminal EXIT INT TERM HUP
 
 # Configuration
-VERSION="0.4.1"
+VERSION="0.4.2"
 USER="${USER:-$(whoami)}"
 SESSION_DIR="${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-${USER}"
 SOCKET_PREFIX="nvim-session"
