@@ -41,78 +41,92 @@ mkdir -p ~/.config/nvim-screen
 curl -fsSL https://raw.githubusercontent.com/tijoseymathew/nvim-screen/main/init.lua -o ~/.config/nvim-screen/init.lua
 ```
 
+Remote hosts don't need any of this — connecting with `-s` installs
+nvim-screen there automatically (see below).
+
 ## Usage
 
 | Command | Description |
 |---------|-------------|
 | `nvim-screen` | Start new session (auto-named to current directory) |
 | `nvim-screen -S <name>` | Start new session with name |
-| `nvim-screen -ls` | List all sessions |
-| `nvim-screen -r [name]` | Attach to session |
-| `nvim-screen -d <name>` | Detach clients from session |
+| `nvim-screen -ls` | List all sessions (local and remote) |
+| `nvim-screen -r [name]` | Attach to session (`host:name` for remote) |
+| `nvim-screen -d <name>` | Detach all clients from session |
+| `nvim-screen -k <name>` | Kill (terminate) session |
+| `nvim-screen -c <dir>` | Start session in a working directory (local or remote) |
+| `nvim-screen -s <host> ...` | Run any of the above on a remote host |
+| `nvim-screen -s <host> -sync` | Push Neovim, your config, and nvim-screen to host |
 | `nvim-screen -h` | Show help |
 
 Inside Neovim:
-- `:detach` - detach from session
-- `Ctrl-\ Ctrl-N` - alternative detach
+- `:q`, `:qa`, `:wq`, `ZZ`, ... — detach when the quit would end the session;
+  otherwise they close the window as usual
+- `:Detach` — detach all clients explicitly
+- `:Quit` — actually end the session
 
 ## How it works
 
 Uses Neovim's native client-server features:
-- `nvim --listen` creates a session with a socket
-- `nvim --remote-ui` attaches to existing session
+- Each session is a **headless** `nvim --listen` server, detached from your
+  terminal, so it survives client exits, terminal crashes, and dropped SSH
+  connections
+- Your terminal attaches to it as a `nvim --remote-ui` client
+- Detaching just closes the client channel — the server keeps running
 - One socket file per session in `$XDG_RUNTIME_DIR/nvim-sessions-$USER/`
 
 Single bash script. No dependencies beyond standard Unix tools.
 
-## Configuration
+### Quit interception
 
-nvim-screen can inject custom initialization code when starting sessions. The default config (installed to `~/.config/nvim-screen/init.lua`) provides quit interception to prevent accidentally closing sessions.
+The default config (`~/.config/nvim-screen/init.lua`) rewrites quit commands
+on the command line before they execute (`QuitPre`/`ExitPre` autocommands
+cannot abort an exit, so rewriting is the only reliable interception point):
 
-### Quit Interception (Default)
+- A quit that only closes a window or tab runs unchanged
+- A quit that would end the session (`:q` on the last window, `:qa`, `ZZ`, ...)
+  writes files if asked (`:wq`, `:x`) and then **detaches** instead
+- `:Quit` (or `nvim-screen -k <name>` from the shell) ends the session for real
 
-When you press `:q` in a nvim-screen session, you'll be prompted:
-- **Detach** - Keep the session running in the background
-- **Quit** - Actually close the session
+To disable, delete the config file. The init script is pure Lua with full
+access to Neovim's API — add any custom session initialization you want.
+`$NVIM_SCREEN_SESSION` holds the session name inside the server (useful for
+statuslines).
 
-This prevents accidentally closing a session when you meant to detach.
+## Remote sessions
 
-Commands available:
-- `:q`, `:quit`, `:qa`, etc. - Prompts for detach vs quit
-- `:q!` - Force quit (bypasses prompt)
-- `:detach` - Explicitly detach (built-in nvim command)
-
-### Customizing
-
-The config file is installed at: `~/.config/nvim-screen/init.lua`
-
-**To customize:**
 ```bash
-# Edit the config directly
-nvim ~/.config/nvim-screen/init.lua
+nvim-screen -s user@host -S myproj      # start a session on host and attach
+nvim-screen -s user@host -c ~/work/app  # start it in a remote directory
+nvim-screen -s user@host -ls            # list sessions on host
+nvim-screen -r user@host:myproj         # attach to a remote session
+nvim-screen -k user@host:myproj         # kill a remote session
 ```
 
-**To disable quit interception:**
-```bash
-# Just delete the config file
-rm ~/.config/nvim-screen/init.lua
-```
-
-The init script is pure Lua with full access to Neovim's API. Add any custom initialization code you want.
+- Connections are multiplexed over a persistent SSH control master, so
+  repeated commands don't re-authenticate
+- If nvim-screen isn't installed on the host, it is **installed automatically**
+  on first connect (the script and your nvim-screen config are pushed over the
+  existing SSH connection — the remote only needs Neovim 0.9+), and it is
+  re-pushed whenever the remote version differs from yours
+- `-sync` additionally pushes your `~/.config/nvim` to the host, so your
+  editor config follows you (plugins are installed by your plugin manager on
+  first run) — and if the host has no Neovim at all, it installs the official
+  stable build into `~/.local` there, no root required
+- `-c <dir>` sets the session's working directory; when a control master for
+  the host is already up, bash completion completes **remote** directories
+- `nvim-screen -ls` lists local sessions and sessions on every connected host
 
 ## Requirements
 
 - Neovim 0.9+ (for `--remote-ui` and client-server features)
 - Bash
+- OpenSSH client (for remote sessions)
 
 ## Features
 
 - Bash completions for commands and session names
 - Tab completion for SSH hosts from your SSH config
-
-## Coming soon
-
-- Remote session support with easy port forwarding
 
 ## Philosophy
 
