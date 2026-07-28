@@ -29,6 +29,24 @@ This installs:
 - Default config to `~/.config/nvim-screen/init.lua`
 - Bash completions to `~/.local/share/bash-completion/completions/`
 
+**Installing a different branch or fork:**
+
+The installer reads `GITHUB_BRANCH` (default `main`) and `GITHUB_REPO`
+(default `tijoseymathew/nvim-screen`) from the environment:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tijoseymathew/nvim-screen/main/install.sh \
+    | GITHUB_BRANCH=my-feature bash
+```
+
+Note where the variable goes: `GITHUB_BRANCH=x curl ... | bash` would set it
+for `curl`, not for the shell running the installer. When running a local
+copy, the usual prefix works: `GITHUB_BRANCH=my-feature ./install.sh`.
+
+Set `NVIM_SCREEN_OVERWRITE_CONFIG=1` to replace an existing
+`init.lua` without being prompted (the installer keeps it by default when
+there is no terminal to ask on).
+
 **Manual installation:**
 
 ```bash
