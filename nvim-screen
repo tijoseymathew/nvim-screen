@@ -10,20 +10,35 @@
 
 set -euo pipefail
 
-# Terminal cleanup function
+# Set to 1 only once this process has handed the terminal over to an
+# interactive UI (a local nvim client, or a remote session over 'ssh -t').
+# Those are the only cases that can leave the terminal in a raw state.
+TERMINAL_HANDED_OVER=0
+
+# Restore a terminal left in raw mode by a crashed or force-killed UI.
+#
+# Deliberately does NOT use 'tput reset': that emits RIS, which clears the
+# screen and scrollback. On an EXIT trap it fires for every invocation, so
+# '-ls', '-h' and friends would print their output and then immediately wipe
+# it off the screen. The sequences below fix cooked mode, leftover colors and
+# a hidden cursor without touching screen contents.
 cleanup_terminal() {
-    # Reset terminal to sane state
-    # This runs on exit to fix garbled terminal from crashed/forced-exit sessions
+    [[ "$TERMINAL_HANDED_OVER" == "1" ]] || return 0
+    [[ -t 1 ]] || return 0
     stty sane 2>/dev/null || true
-    tput reset 2>/dev/null || true
+    tput sgr0 2>/dev/null || true
     tput cnorm 2>/dev/null || true  # Restore cursor
 }
 
-# Set up trap to clean terminal on any exit
-trap cleanup_terminal EXIT INT TERM HUP
+# Clean up on exit and on the signals that would otherwise kill us mid-session
+# (an uncaught signal skips the EXIT trap entirely).
+trap cleanup_terminal EXIT
+trap 'cleanup_terminal; exit 130' INT
+trap 'cleanup_terminal; exit 143' TERM
+trap 'cleanup_terminal; exit 129' HUP
 
 # Configuration
-VERSION="0.4.2"
+VERSION="0.4.3"
 USER="${USER:-$(whoami)}"
 SESSION_DIR="${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-${USER}"
 SOCKET_PREFIX="nvim-session"
@@ -33,6 +48,17 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nvim-screen"
 # Remote invocations must not rely on the login shell's PATH: non-interactive
 # SSH commands often miss ~/.local/bin, where nvim-screen installs itself.
 REMOTE_PATH='PATH="$HOME/.local/bin:$PATH"'
+
+# 'timeout' ships with GNU coreutils; macOS has it only via Homebrew, usually
+# as 'gtimeout'. Empty when neither is present, in which case callers run the
+# command unguarded.
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="gtimeout"
+else
+    TIMEOUT_CMD=""
+fi
 
 # Lua one-liner that detaches every attached UI client and returns the count.
 DETACH_UIS_LUA='luaeval("(function() local n=0 for _,ui in ipairs(vim.api.nvim_list_uis()) do if ui.chan and ui.chan>0 then pcall(vim.fn.chanclose,ui.chan) n=n+1 end end return n end)()")'
@@ -114,8 +140,11 @@ check_ssh_control_master() {
     local control_path="$1"
     # Hostname is not actually needed - the socket contains the connection info
     # Using a dummy value since SSH ignores it when using control master
-    # Use timeout to prevent hanging - if check takes more than 2 seconds, assume failed
-    timeout 2 ssh -O check -S "$control_path" dummy 2>&1 | grep -q "Master running"
+    # Cap the check so a stale socket can't hang us. 'timeout' is GNU
+    # coreutils and is absent on stock macOS, so fall back to running the
+    # check unguarded rather than failing every lookup with 'command not found'.
+    ${TIMEOUT_CMD:+$TIMEOUT_CMD 2} ssh -O check -S "$control_path" dummy 2>&1 \
+        | grep -q "Master running"
     return $?
 }
 
@@ -404,7 +433,10 @@ run_client() {
     socket_path=$(get_socket_path "$session_name")
 
     # Returns when this client detaches or the session ends
+    TERMINAL_HANDED_OVER=1
     nvim --server "$socket_path" --remote-ui || true
+    cleanup_terminal
+    TERMINAL_HANDED_OVER=0
 
     if [[ -S "$socket_path" ]] && check_socket_health "$socket_path"; then
         echo "[detached from $session_name]"
@@ -442,7 +474,9 @@ start_session() {
         echo "Starting remote session '$session_name' on $ssh_host..."
 
         # Start remote session via SSH with pseudo-terminal
-        # This will execute nvim-screen on the remote host and attach to it
+        # This will execute nvim-screen on the remote host and attach to it.
+        # Not exec'd, so the EXIT trap still gets to restore the terminal.
+        TERMINAL_HANDED_OVER=1
         ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy "$remote_cmd"
         exit $?
     fi
@@ -511,7 +545,9 @@ attach_session() {
             exit 1
         fi
 
-        # Attach to remote session via SSH with pseudo-terminal
+        # Attach to remote session via SSH with pseudo-terminal.
+        # Not exec'd, so the EXIT trap still gets to restore the terminal.
+        TERMINAL_HANDED_OVER=1
         ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
             "$REMOTE_PATH nvim-screen -r '$base_session_name'"
         exit $?
