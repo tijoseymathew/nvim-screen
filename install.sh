@@ -44,20 +44,29 @@ if ! command -v curl &> /dev/null; then
     exit 1
 fi
 
-TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/nvim-screen-install.XXXXXX")
-trap 'rm -rf "$TMP_DIR"' EXIT
+# Temp file of an in-flight download, removed if the installer is interrupted
+DOWNLOAD_TMP=""
+trap 'rm -f "$DOWNLOAD_TMP" 2>/dev/null || true' EXIT
 
 # Fetch a file into place. Downloads to a temp file first: 'curl -o' truncates
 # its target before it knows whether the transfer will succeed, so a network
 # failure partway through would leave an empty or half-written nvim-screen
-# where a working one used to be.
+# where a working one used to be. The temp file lives in the destination
+# directory - $TMPDIR may be a different filesystem, and a cross-filesystem
+# mv is a truncate-and-copy, not the atomic rename this relies on.
 download() {
-    local remote_path="$1" dest="$2"
-    local tmp="$TMP_DIR/${remote_path##*/}"
+    local remote_path="$1" dest="$2" tmp
 
-    curl -fsSL "${BASE_URL}/${remote_path}" -o "$tmp" || return 1
-    [[ -s "$tmp" ]] || return 1
+    tmp=$(mktemp "${dest}.XXXXXX") || return 1
+    DOWNLOAD_TMP="$tmp"
+    if ! curl -fsSL "${BASE_URL}/${remote_path}" -o "$tmp" || [[ ! -s "$tmp" ]]; then
+        rm -f "$tmp"
+        DOWNLOAD_TMP=""
+        return 1
+    fi
+    chmod 644 "$tmp"  # mktemp creates 0600; these are ordinary shared-read files
     mv -f "$tmp" "$dest"
+    DOWNLOAD_TMP=""
 }
 
 # True when there is a terminal we can prompt on. The /dev/tty node exists
