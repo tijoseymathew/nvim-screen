@@ -15,19 +15,31 @@ set -euo pipefail
 # Those are the only cases that can leave the terminal in a raw state.
 TERMINAL_HANDED_OVER=0
 
-# Restore a terminal left in raw mode by a crashed or force-killed UI.
+# Restore a terminal left in a bad state by a crashed, force-killed, or
+# disconnected UI.
+#
+# Two layers need fixing. 'stty sane' repairs the tty driver (cooked mode,
+# echo). But when the SSH connection dies while nvim owns the screen, the
+# *terminal emulator* is also stranded in modes nvim never got to switch
+# off: the kitty keyboard protocol (every keypress then renders as
+# '[27u'-style garbage, which is also why typing 'reset' into the wreckage
+# gets nowhere), mouse reporting, bracketed paste, the alternate screen.
+# Those live in the emulator, out of stty's reach, so each is switched off
+# explicitly below.
 #
 # Deliberately does NOT use 'tput reset': that emits RIS, which clears the
-# screen and scrollback. On an EXIT trap it fires for every invocation, so
-# '-ls', '-h' and friends would print their output and then immediately wipe
-# it off the screen. The sequences below fix cooked mode, leftover colors and
-# a hidden cursor without touching screen contents.
+# screen and scrollback. The sequences below restore a usable terminal
+# without touching screen contents, and are no-ops on a healthy one.
 cleanup_terminal() {
     [[ "$TERMINAL_HANDED_OVER" == "1" ]] || return 0
     [[ -t 1 ]] || return 0
     stty sane 2>/dev/null || true
-    tput sgr0 2>/dev/null || true
-    tput cnorm 2>/dev/null || true  # Restore cursor
+    #  [<u      pop kitty keyboard protocol   [>4;0m  modifyOtherKeys off
+    #  [?100xl  mouse reporting off           [?1004l focus reporting off
+    #  [?2004l  bracketed paste off           [?1l >  normal cursor keys/keypad
+    #  [?1049l  leave alternate screen        [0m     reset colors
+    #  [?25h    show cursor
+    printf '\033[<u\033[>4;0m\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1004l\033[?2004l\033[?1l\033>\033[?1049l\033[0m\033[?25h' 2>/dev/null || true
 }
 
 # Clean up on exit and on the signals that would otherwise kill us mid-session
@@ -38,7 +50,7 @@ trap 'cleanup_terminal; exit 143' TERM
 trap 'cleanup_terminal; exit 129' HUP
 
 # Configuration
-VERSION="0.4.3"
+VERSION="0.4.4"
 USER="${USER:-$(whoami)}"
 SESSION_DIR="${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-${USER}"
 SOCKET_PREFIX="nvim-session"
@@ -473,12 +485,19 @@ start_session() {
 
         echo "Starting remote session '$session_name' on $ssh_host..."
 
-        # Start remote session via SSH with pseudo-terminal
-        # This will execute nvim-screen on the remote host and attach to it.
-        # Not exec'd, so the EXIT trap still gets to restore the terminal.
+        # Run the remote nvim-screen over SSH with a pseudo-terminal. The
+        # exit status is captured rather than left to 'set -e' so the
+        # terminal is restored right here even when the connection itself
+        # dies (ssh exits 255) with nvim still owning the screen.
+        local status=0
         TERMINAL_HANDED_OVER=1
-        ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy "$remote_cmd"
-        exit $?
+        ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy "$remote_cmd" || status=$?
+        cleanup_terminal
+        TERMINAL_HANDED_OVER=0
+        if [[ $status -eq 255 ]]; then
+            echo "[connection to $ssh_host lost - session keeps running, reattach with '$(basename "$0") -r $ssh_host:$session_name']"
+        fi
+        exit $status
     fi
 
     if [[ -S "$socket_path" ]]; then
@@ -545,12 +564,20 @@ attach_session() {
             exit 1
         fi
 
-        # Attach to remote session via SSH with pseudo-terminal.
-        # Not exec'd, so the EXIT trap still gets to restore the terminal.
+        # Attach over SSH with a pseudo-terminal. The exit status is
+        # captured rather than left to 'set -e' so the terminal is restored
+        # right here even when the connection itself dies (ssh exits 255)
+        # with nvim still owning the screen.
+        local status=0
         TERMINAL_HANDED_OVER=1
         ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
-            "$REMOTE_PATH nvim-screen -r '$base_session_name'"
-        exit $?
+            "$REMOTE_PATH nvim-screen -r '$base_session_name'" || status=$?
+        cleanup_terminal
+        TERMINAL_HANDED_OVER=0
+        if [[ $status -eq 255 ]]; then
+            echo "[connection to $ssh_host lost - session keeps running, reattach with '$(basename "$0") -r $session_name']"
+        fi
+        exit $status
     fi
 
     # Not in host:session format, check locally first
@@ -730,6 +757,8 @@ Options:
   -sync              Sync nvim-screen and your Neovim config to the remote,
                      installing Neovim there if it's missing (with -s)
   -wipe              Clean up stale/dead sessions
+  -fix               Restore a terminal left garbled by a dead session
+                     (this also happens automatically when a session ends)
   -v, --version      Show version information
   -h, --help         Show this help message
   --                 Pass all following arguments to nvim
@@ -837,6 +866,10 @@ main() {
                 ;;
             -wipe)
                 action="wipe"
+                shift
+                ;;
+            -fix)
+                action="fix"
                 shift
                 ;;
             -v|--version)
@@ -974,6 +1007,15 @@ main() {
         wipe)
             cleanup_stale_sockets
             echo "Stale sessions cleaned up."
+            ;;
+        fix)
+            # Force the cleanup: the guard flag exists to skip cleanup on
+            # non-interactive invocations, but here fixing the terminal IS
+            # the requested action
+            TERMINAL_HANDED_OVER=1
+            cleanup_terminal
+            TERMINAL_HANDED_OVER=0
+            echo "Terminal restored."
             ;;
     esac
 }

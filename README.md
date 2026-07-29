@@ -75,6 +75,7 @@ nvim-screen there automatically (see below).
 | `nvim-screen -c <dir>` | Start session in a working directory (local or remote) |
 | `nvim-screen -s <host> ...` | Run any of the above on a remote host |
 | `nvim-screen -s <host> -sync` | Push Neovim, your config, and nvim-screen to host |
+| `nvim-screen -fix` | Restore a terminal left garbled by a dead session |
 | `nvim-screen -h` | Show help |
 
 Inside Neovim:
@@ -134,6 +135,22 @@ nvim-screen -k user@host:myproj         # kill a remote session
 - `-c <dir>` sets the session's working directory; when a control master for
   the host is already up, bash completion completes **remote** directories
 - `nvim-screen -ls` lists local sessions and sessions on every connected host
+
+## Troubleshooting
+
+**Terminal prints garbage after a dropped SSH connection.** When the
+connection dies while nvim owns the screen, the terminal emulator is left in
+modes nvim never got to switch off — the kitty keyboard protocol (every
+keypress then prints `[27u`-style sequences, which is also why typing
+`reset` into the wreckage often goes nowhere), mouse reporting, bracketed
+paste, the alternate screen. nvim-screen restores all of this automatically
+the moment `ssh` returns, and the session itself keeps running server-side —
+just reattach with `nvim-screen -r host:name`.
+
+If a terminal is already stuck (older nvim-screen, or the process was
+force-killed before its cleanup could run), run `nvim-screen -fix` in it.
+The keystrokes may echo as garbage, but they still reach the shell — press
+Enter and the command runs.
 
 ## Requirements
 

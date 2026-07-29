@@ -13,7 +13,7 @@ _nvim_screen_completions() {
     local socket_prefix="nvim-session"
 
     # Main options
-    opts="-s -S -c -ls -list -r -x -d -D -k -kill -sync -wipe -v --version -h --help --"
+    opts="-s -S -c -ls -list -r -x -d -D -k -kill -sync -wipe -fix -v --version -h --help --"
 
     # Handle option-specific completions
     case "${prev}" in
