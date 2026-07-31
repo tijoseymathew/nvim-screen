@@ -57,6 +57,8 @@ nvim-screen there automatically (see below).
 | `nvim-screen -c <dir>` | Start session in a working directory (local or remote) |
 | `nvim-screen -s <host> ...` | Run any of the above on a remote host |
 | `nvim-screen -s <host> -sync` | Push Neovim, your config, and nvim-screen to host |
+| `nvim-screen -wipe` | Clean up dead sessions and stale SSH connections |
+| `nvim-screen -reset` | Repair a terminal left garbled by a dead session |
 | `nvim-screen -h` | Show help |
 
 Inside Neovim:
@@ -116,6 +118,43 @@ nvim-screen -k user@host:myproj         # kill a remote session
 - `-c <dir>` sets the session's working directory; when a control master for
   the host is already up, bash completion completes **remote** directories
 - `nvim-screen -ls` lists local sessions and sessions on every connected host
+
+### When the connection drops
+
+Your session is on the host, not in the connection, so nothing is lost when
+the link dies — but the terminal you were typing into needs to come back.
+Three things make sure it does:
+
+- **The link is supervised.** The SSH control master pings the host every 10s
+  and gives up after 3 missed replies, and a watchdog beside your attached
+  session notices when that happens (or when the master is up but nothing is
+  getting through) and drops you back to your shell — normally within ~30s of
+  the network dying, instead of the several minutes TCP takes to time out.
+- **The terminal is put back.** Raw mode, the alternate screen, mouse
+  reporting, bracketed paste and alternate character sets are all unwound on
+  every exit path, including a killed or crashed client. Your saved terminal
+  settings are restored exactly; the screen and scrollback are left alone.
+- **`Enter ~ .` still works.** The escape character is requested explicitly on
+  the interactive connection, so the usual SSH escape drops you back to the
+  local shell without waiting for the watchdog. It only gets through while the
+  client is still reading your keystrokes, and older OpenSSH builds don't
+  handle escapes on multiplexed sessions at all — `NVIM_SCREEN_SSH_DIRECT=1`
+  gives the session its own connection (one extra authentication) where escape
+  handling and keepalives are done by that client itself.
+
+If a terminal ends up garbled anyway — force-quitting the terminal emulator,
+say, or something that never ran through nvim-screen — `nvim-screen -reset`
+in that shell puts it right.
+
+Reattaching evicts whatever client was attached before, because Neovim sizes
+the screen to the smallest attached UI and a leftover client from a dropped
+connection is what makes a reattached session look mangled. Set
+`NVIM_SCREEN_SHARE=1` to attach alongside existing clients instead.
+
+Tuning knobs, all environment variables: `NVIM_SCREEN_KEEPALIVE_INTERVAL`
+(10), `NVIM_SCREEN_KEEPALIVE_COUNT` (3), `NVIM_SCREEN_QUERY_TIMEOUT` (10),
+`NVIM_SCREEN_WATCHDOG` (1 — set to 0 to disable), `NVIM_SCREEN_WATCHDOG_TICK`
+(3), `NVIM_SCREEN_DEEP_PROBE_EVERY` (10 ticks, 0 disables).
 
 ## Requirements
 
