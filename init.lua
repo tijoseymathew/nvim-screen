@@ -43,5 +43,93 @@ vim.api.nvim_create_autocmd("QuitPre", {
 	desc = "Prompt to detach or quit before closing nvim.",
 })
 
+-- Session switching --------------------------------------------------------
+-- nvim-screen exports NVIM_SCREEN_SESSION and NVIM_SCREEN_DIR when it starts
+-- the server. :SwitchSession writes the target session name to a switch file
+-- and detaches the invoking UI; the nvim-screen wrapper that owns that UI
+-- picks up the file and re-attaches to the requested session.
+
+local uv = vim.uv or vim.loop
+local session_name = vim.env.NVIM_SCREEN_SESSION
+local session_dir = vim.env.NVIM_SCREEN_DIR
+
+-- List other sessions by scanning the session directory for sockets.
+local function list_other_sessions()
+	local sessions = {}
+	if not session_dir then
+		return sessions
+	end
+	for name in vim.fs.dir(session_dir) do
+		local other = name:match("^nvim%-session%-(.+)%.sock$")
+		if other and other ~= session_name then
+			table.insert(sessions, other)
+		end
+	end
+	table.sort(sessions)
+	return sessions
+end
+
+local function switch_to(target)
+	if not (session_dir and session_name) then
+		vim.notify(
+			"nvim-screen: session environment not set; start this session with nvim-screen to enable switching",
+			vim.log.levels.ERROR
+		)
+		return
+	end
+	if target == session_name then
+		vim.notify("Already in session '" .. target .. "'", vim.log.levels.INFO)
+		return
+	end
+	if not uv.fs_stat(session_dir .. "/nvim-session-" .. target .. ".sock") then
+		vim.notify("nvim-screen: no session named '" .. target .. "'", vim.log.levels.ERROR)
+		return
+	end
+
+	local switch_file = session_dir .. "/switch-" .. session_name
+	local f, err = io.open(switch_file, "w")
+	if not f then
+		vim.notify("nvim-screen: cannot write switch file: " .. tostring(err), vim.log.levels.ERROR)
+		return
+	end
+	f:write(target .. "\n")
+	f:close()
+
+	-- Detach the UI that invoked the command; its nvim-screen wrapper reads
+	-- the switch file and attaches to the target session. If the detach
+	-- fails (e.g. no UI on this channel), remove the switch file so a later
+	-- detach doesn't trigger a surprise switch.
+	local ok, detach_err = pcall(vim.cmd, "detach")
+	if not ok then
+		os.remove(switch_file)
+		vim.notify("nvim-screen: switch aborted, could not detach: " .. tostring(detach_err), vim.log.levels.ERROR)
+	end
+end
+
+vim.api.nvim_create_user_command("SwitchSession", function(opts)
+	if opts.args ~= "" then
+		switch_to(opts.args)
+		return
+	end
+	local sessions = list_other_sessions()
+	if #sessions == 0 then
+		vim.notify("nvim-screen: no other sessions to switch to", vim.log.levels.INFO)
+		return
+	end
+	vim.ui.select(sessions, { prompt = "Switch to session:" }, function(choice)
+		if choice then
+			switch_to(choice)
+		end
+	end)
+end, {
+	nargs = "?",
+	complete = function(arg_lead)
+		return vim.tbl_filter(function(s)
+			return vim.startswith(s, arg_lead)
+		end, list_other_sessions())
+	end,
+	desc = "Detach this client and attach it to another nvim-screen session.",
+})
+
 -- Show a subtle message that the session is active.
-vim.notify("nvim-screen session active (use :detach to detach)", vim.log.levels.INFO)
+vim.notify("nvim-screen session active (:detach to detach, :SwitchSession to switch)", vim.log.levels.INFO)

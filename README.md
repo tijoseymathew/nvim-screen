@@ -54,6 +54,7 @@ curl -fsSL https://raw.githubusercontent.com/tijoseymathew/nvim-screen/main/init
 
 Inside Neovim:
 - `:detach` - detach from session
+- `:SwitchSession [name]` - switch this client to another session (picker when no name is given)
 - `Ctrl-\ Ctrl-N` - alternative detach
 
 ## How it works
@@ -81,6 +82,22 @@ Commands available:
 - `:q`, `:quit`, `:qa`, etc. - Prompts for detach vs quit
 - `:q!` - Force quit (bypasses prompt)
 - `:detach` - Explicitly detach (built-in nvim command)
+
+### Session Switching (Default)
+
+`:SwitchSession [name]` detaches the current client and re-attaches it to
+another local session, without leaving Neovim's workflow or touching the
+terminal in between. With no argument it opens a picker (`vim.ui.select`)
+listing the other active sessions; the name argument tab-completes.
+
+This works from both attached clients (`nvim-screen -r`) and the terminal
+that originally started the session — in the latter case the session's server
+keeps running in the background while your terminal hops to the target
+session. The session you switched away from stays alive; switch back to it
+the same way.
+
+The command is defined in the default `init.lua` config, so it is only
+available in sessions started while that config is installed.
 
 ### Customizing
 
