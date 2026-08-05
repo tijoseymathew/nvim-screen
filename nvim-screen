@@ -328,7 +328,7 @@ start_session() {
             rm -f "$switch_file"
             if [[ -n "$target" ]]; then
                 echo "Switching to session '$target'..."
-                attach_session "$target"
+                attach_session "$target" "$session_name"
             fi
         fi
     fi
@@ -338,8 +338,27 @@ start_session() {
 # Loops so that :SwitchSession inside a session can hop to another one: the
 # session writes the target name to its switch file and detaches this client,
 # and the loop re-attaches to the requested session.
+# An optional second argument names a session to fall back to when the
+# requested one is unreachable (used when hopping away from a live session:
+# the client is already detached, so on failure we re-attach instead of
+# stranding the user at the shell).
 attach_session() {
     local session_name="$1"
+    local prev_session="${2:-}"
+
+    # Re-attach to the fallback session, or exit with the given message.
+    # Clears the fallback so two consecutive failures cannot ping-pong.
+    fall_back_or_die() {
+        local message="$1"
+        echo -e "${RED}${message}${NC}"
+        if [[ -n "$prev_session" ]]; then
+            echo "Re-attaching to session '$prev_session'..."
+            session_name="$prev_session"
+            prev_session=""
+            return 0
+        fi
+        return 1
+    }
 
     while true; do
         local ssh_host=""
@@ -354,13 +373,17 @@ attach_session() {
 
             # Establish SSH control master if not already active
             if ! establish_ssh_control_master "$ssh_host"; then
-                echo -e "${RED}Failed to establish SSH connection${NC}"
+                if fall_back_or_die "Failed to establish SSH connection to $ssh_host"; then
+                    continue
+                fi
                 exit 1
             fi
 
             # Verify session exists on remote before attempting to attach
             if ! ssh_exec "$ssh_host" "[ -S \"\${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-\$USER/nvim-session-$base_session_name.sock\" ]" 2>/dev/null; then
-                echo -e "${RED}Error: Session '$base_session_name' not found on $ssh_host${NC}"
+                if fall_back_or_die "Error: Session '$base_session_name' not found on $ssh_host"; then
+                    continue
+                fi
                 exit 1
             fi
 
@@ -376,8 +399,9 @@ attach_session() {
         socket_path=$(get_socket_path "$session_name")
 
         if [[ ! -S "$socket_path" ]]; then
-            # Not found anywhere
-            echo -e "${RED}Error: Session '$session_name' not found.${NC}"
+            if fall_back_or_die "Error: Session '$session_name' not found."; then
+                continue
+            fi
             echo
             list_sessions ""
             exit 1
@@ -396,6 +420,7 @@ attach_session() {
             rm -f "$switch_file"
             if [[ -n "$target" ]]; then
                 echo "Switching to session '$target'..."
+                prev_session="$session_name"
                 session_name="$target"
                 continue
             fi
@@ -563,8 +588,9 @@ Examples:
 Inside Neovim:
   :detach                  Detach from session (keeps it running)
   :SwitchSession [name]    Switch this client to another session
-                           (picker when no name is given; requires the
-                           default init.lua config)
+                           (picker when no name is given; use host:name
+                           to hop to a session on a remote host; requires
+                           the default init.lua config)
   Ctrl-\\ Ctrl-N           Alternative way to detach
 
 Session sockets are stored in: $SESSION_DIR

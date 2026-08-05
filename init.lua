@@ -69,6 +69,23 @@ local function list_other_sessions()
 	return sessions
 end
 
+-- List host:-prefixes for hosts with an SSH control socket, so remote
+-- targets like host:session can be tab-completed up to the colon.
+local function list_ssh_host_prefixes()
+	local hosts = {}
+	if not session_dir then
+		return hosts
+	end
+	for name in vim.fs.dir(session_dir) do
+		local host = name:match("^ssh%-control%-(.+)%.sock$")
+		if host then
+			table.insert(hosts, host .. ":")
+		end
+	end
+	table.sort(hosts)
+	return hosts
+end
+
 local function switch_to(target)
 	if not (session_dir and session_name) then
 		vim.notify(
@@ -81,7 +98,11 @@ local function switch_to(target)
 		vim.notify("Already in session '" .. target .. "'", vim.log.levels.INFO)
 		return
 	end
-	if not uv.fs_stat(session_dir .. "/nvim-session-" .. target .. ".sock") then
+	-- host:session targets are handled by the wrapper, which hops over SSH.
+	-- Existence can only be verified there; on failure the wrapper falls
+	-- back to re-attaching to this session.
+	local is_remote = target:match("^[^:]+:.+$") ~= nil
+	if not is_remote and not uv.fs_stat(session_dir .. "/nvim-session-" .. target .. ".sock") then
 		vim.notify("nvim-screen: no session named '" .. target .. "'", vim.log.levels.ERROR)
 		return
 	end
@@ -124,11 +145,13 @@ vim.api.nvim_create_user_command("SwitchSession", function(opts)
 end, {
 	nargs = "?",
 	complete = function(arg_lead)
+		local candidates = list_other_sessions()
+		vim.list_extend(candidates, list_ssh_host_prefixes())
 		return vim.tbl_filter(function(s)
 			return vim.startswith(s, arg_lead)
-		end, list_other_sessions())
+		end, candidates)
 	end,
-	desc = "Detach this client and attach it to another nvim-screen session.",
+	desc = "Detach this client and attach it to another nvim-screen session (name or host:name).",
 })
 
 -- Show a subtle message that the session is active.

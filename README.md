@@ -96,6 +96,16 @@ keeps running in the background while your terminal hops to the target
 session. The session you switched away from stays alive; switch back to it
 the same way.
 
+A `host:session` target hops to a session on a remote host, exactly like
+`nvim-screen -r host:session` (reusing an SSH control connection when one is
+active, establishing one otherwise). Hosts with an active SSH connection
+tab-complete up to the colon; remote session names are not completed, and the
+no-argument picker only lists local sessions. If the remote hop fails —
+unreachable host, no such session — your terminal re-attaches to the session
+you switched away from. Note that hopping across SSH is one-way: once
+attached to a remote session, `:SwitchSession` there switches between that
+host's sessions only.
+
 The command is defined in the default `init.lua` config, so it is only
 available in sessions started while that config is installed.
 
