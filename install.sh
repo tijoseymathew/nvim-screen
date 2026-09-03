@@ -167,3 +167,49 @@ fi
 echo -e "${YELLOW}Note:${NC} To enable bash completions, restart your shell or run:"
 echo -e "  ${BLUE}source $COMPLETION_DIR/nvim-screen${NC}"
 echo
+
+# SSH multiplexing recommendation.
+#
+# nvim-screen used to start and manage a control master per host. It doesn't
+# any more - that belongs in the user's own ssh config, where every other ssh
+# caller benefits from it too - so tell them how to set it up. Remote sessions
+# work without it; they just re-authenticate on every command.
+ssh_multiplexing_configured() {
+    local f
+    for f in "$HOME/.ssh/config" /etc/ssh/ssh_config; do
+        [[ -r "$f" ]] || continue
+        grep -qiE '^[[:space:]]*ControlMaster[[:space:]]+(auto|yes)' "$f" && return 0
+    done
+    # Included files are common enough that a ControlPath anywhere counts
+    if [[ -d "$HOME/.ssh/config.d" ]]; then
+        grep -rqiE '^[[:space:]]*ControlMaster[[:space:]]+(auto|yes)' "$HOME/.ssh/config.d" 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+if ssh_multiplexing_configured; then
+    echo -e "${GREEN}✓${NC} SSH connection multiplexing is already configured"
+    echo -e "  Remote sessions will reuse a single authenticated connection"
+    echo
+else
+    echo -e "${YELLOW}Recommended:${NC} enable SSH connection multiplexing"
+    echo
+    echo -e "nvim-screen does not manage SSH control masters itself - it uses"
+    echo -e "whatever your ${BLUE}~/.ssh/config${NC} says. Remote sessions work without this,"
+    echo -e "but every remote command re-authenticates. Adding it also speeds up"
+    echo -e "${BLUE}scp${NC}, ${BLUE}rsync${NC} and ${BLUE}git${NC} over SSH, and the ${BLUE}ServerAlive${NC} settings are what make a"
+    echo -e "dropped connection get noticed in seconds instead of minutes."
+    echo
+    echo -e "Add to ${BLUE}~/.ssh/config${NC}:"
+    echo
+    echo -e "${BLUE}  Host *${NC}"
+    echo -e "${BLUE}      ControlMaster auto${NC}"
+    echo -e "${BLUE}      ControlPath ~/.ssh/sockets/%r@%h:%p${NC}"
+    echo -e "${BLUE}      ControlPersist 10m${NC}"
+    echo -e "${BLUE}      ServerAliveInterval 15${NC}"
+    echo -e "${BLUE}      ServerAliveCountMax 3${NC}"
+    echo
+    echo -e "Then create the socket directory:"
+    echo -e "${BLUE}  mkdir -p ~/.ssh/sockets && chmod 700 ~/.ssh/sockets${NC}"
+    echo
+fi
