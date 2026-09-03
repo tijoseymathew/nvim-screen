@@ -10,47 +10,122 @@
 
 set -euo pipefail
 
-# Set to 1 only once this process has handed the terminal over to an
-# interactive UI (a local nvim client, or a remote session over 'ssh -t').
-# Those are the only cases that can leave the terminal in a raw state.
+# --------------------------------------------------------------------------
+# Terminal state
+#
+# A full-screen client - Neovim's TUI, usually at the far end of an SSH
+# connection - takes the terminal into raw mode and leaves the emulator on
+# the alternate screen with mouse reporting, bracketed paste, the kitty
+# keyboard protocol and alternate character sets switched on. It undoes all
+# of that when it exits normally. When it does not exit normally - the link
+# drops, ssh is killed, the client crashes - nobody undoes it, and the shell
+# you land back in is unusable: no echo, no newlines, keystrokes echoing as
+# '[27u' garbage or line-drawing characters. That is the terminal people
+# describe as "mangled", and typing 'reset' into it usually gets nowhere
+# because the keyboard protocol garbles what you type.
+#
+# Two layers have to be put back and they need different tools. The tty
+# driver (raw mode, echo, newline translation) is stty's; the emulator modes
+# are out of stty's reach and have to be switched off with the escape
+# sequences that set them. Both are done here, on every exit path, and only
+# when this process actually handed the terminal to such a client.
+#
+# Deliberately not 'tput reset' or RIS: those also erase the screen and the
+# scrollback, throwing away whatever the user still wanted to read.
+# --------------------------------------------------------------------------
 TERMINAL_HANDED_OVER=0
+SAVED_STTY=""
+# PID of an interactive ssh we are supervising, so a signal can take it down
+# with us instead of leaving it holding the terminal.
+SSH_ATTACH_PID=""
 
-# Restore a terminal left in a bad state by a crashed, force-killed, or
-# disconnected UI.
-#
-# Two layers need fixing. 'stty sane' repairs the tty driver (cooked mode,
-# echo). But when the SSH connection dies while nvim owns the screen, the
-# *terminal emulator* is also stranded in modes nvim never got to switch
-# off: the kitty keyboard protocol (every keypress then renders as
-# '[27u'-style garbage, which is also why typing 'reset' into the wreckage
-# gets nowhere), mouse reporting, bracketed paste, the alternate screen.
-# Those live in the emulator, out of stty's reach, so each is switched off
-# explicitly below.
-#
-# Deliberately does NOT use 'tput reset': that emits RIS, which clears the
-# screen and scrollback. The sequences below restore a usable terminal
-# without touching screen contents, and are no-ops on a healthy one.
+# /dev/tty exists as a device node even when there is no controlling terminal
+# to open, so '-e'/'-c' tests prove nothing - probe it by opening it.
+have_tty() {
+    { : >/dev/tty; } 2>/dev/null
+}
+
+# Act on the controlling terminal, not on stdin: the caller may have
+# redirected stdin, and a dying session still has to be cleaned up.
+tty_stty() {
+    if have_tty; then
+        stty "$@" 2>/dev/null </dev/tty
+    else
+        stty "$@" 2>/dev/null
+    fi
+}
+
+# Remember the terminal's settings before handing it to a full-screen client
+arm_terminal_guard() {
+    SAVED_STTY=$(tty_stty -g || true)
+    TERMINAL_HANDED_OVER=1
+}
+
+disarm_terminal_guard() {
+    TERMINAL_HANDED_OVER=0
+    SAVED_STTY=""
+}
+
+# The emulator modes a full-screen application may have left set. Every one
+# of these is a no-op on a terminal that is already healthy.
+emit_terminal_reset() {
+    printf '\033[<u'                           # pop the kitty keyboard protocol
+    printf '\033[>4;0m'                        # modifyOtherKeys off
+    printf '\033[?1000l\033[?1002l\033[?1003l' # mouse reporting off
+    printf '\033[?1005l\033[?1006l\033[?1015l' # ... and its extended encodings
+    printf '\033[?2004l'                       # bracketed paste off
+    printf '\033[?1004l'                       # focus reporting off
+    printf '\033[?1l\033>'                     # normal cursor keys, numeric keypad
+    printf '\033[?7h'                          # auto-wrap back on
+    printf '\033[4l'                           # replace mode, not insert
+    printf '\033[r'                            # scrolling region back to full screen
+    printf '\033(B\033)B\017'                  # ASCII in G0/G1: undoes line-drawing garbage
+    printf '\033[m'                            # default colours and attributes
+    printf '\033[?1049l\033[?1047l\033[?47l'   # leave the alternate screen
+    printf '\033[?25h'                         # cursor visible again
+}
+
 cleanup_terminal() {
     [[ "$TERMINAL_HANDED_OVER" == "1" ]] || return 0
-    [[ -t 1 ]] || return 0
-    stty sane 2>/dev/null || true
-    #  [<u      pop kitty keyboard protocol   [>4;0m  modifyOtherKeys off
-    #  [?100xl  mouse reporting off           [?1004l focus reporting off
-    #  [?2004l  bracketed paste off           [?1l >  normal cursor keys/keypad
-    #  [?1049l  leave alternate screen        [0m     reset colors
-    #  [?25h    show cursor
-    printf '\033[<u\033[>4;0m\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1004l\033[?2004l\033[?1l\033>\033[?1049l\033[0m\033[?25h' 2>/dev/null || true
+
+    # Restore the exact settings we saved; 'sane' is the fallback for when
+    # there were none to save (no tty at arm time) or restoring them failed.
+    if [[ -n "$SAVED_STTY" ]]; then
+        tty_stty "$SAVED_STTY" || tty_stty sane || true
+    else
+        tty_stty sane || true
+    fi
+
+    # Write to /dev/tty rather than stdout, so the reset still lands when the
+    # caller redirected output - the terminal needs fixing either way.
+    if have_tty; then
+        emit_terminal_reset >/dev/tty 2>/dev/null || true
+    elif [[ -t 1 ]]; then
+        emit_terminal_reset 2>/dev/null || true
+    fi
+}
+
+# Take down a supervised ssh before we go, so it cannot outlive us still
+# holding the terminal in raw mode.
+kill_attached_ssh() {
+    [[ -n "$SSH_ATTACH_PID" ]] || return 0
+    kill -TERM "$SSH_ATTACH_PID" 2>/dev/null || true
+    SSH_ATTACH_PID=""
 }
 
 # Clean up on exit and on the signals that would otherwise kill us mid-session
-# (an uncaught signal skips the EXIT trap entirely).
+# (an uncaught signal skips the EXIT trap entirely). The interactive ssh is
+# run as a background job and waited for, precisely so these traps get a
+# chance to run: bash defers a trap until the current *foreground* child
+# exits, which is no use when that child is the thing that is stuck.
 trap cleanup_terminal EXIT
-trap 'cleanup_terminal; exit 130' INT
-trap 'cleanup_terminal; exit 143' TERM
-trap 'cleanup_terminal; exit 129' HUP
+trap 'kill_attached_ssh; cleanup_terminal; exit 130' INT
+trap 'kill_attached_ssh; cleanup_terminal; exit 131' QUIT
+trap 'kill_attached_ssh; cleanup_terminal; exit 143' TERM
+trap 'kill_attached_ssh; cleanup_terminal; exit 129' HUP
 
 # Configuration
-VERSION="0.4.4"
+VERSION="0.5.0"
 USER="${USER:-$(whoami)}"
 SESSION_DIR="${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-${USER}"
 SOCKET_PREFIX="nvim-session"
@@ -67,6 +142,24 @@ SSH_HOSTS_FILE="$SESSION_DIR/ssh-hosts"
 # hangs the command instead of reporting itself.
 QUERY_TIMEOUT="${NVIM_SCREEN_QUERY_TIMEOUT:-10}"
 CONNECT_TIMEOUT="${NVIM_SCREEN_CONNECT_TIMEOUT:-5}"
+
+# Link supervision for an attached remote session. Without it, a dead network
+# leaves ssh in a TCP retransmit loop for minutes with the terminal frozen in
+# Neovim's alternate screen and no way out - which is how a terminal ends up
+# needing repair in the first place.
+#
+# Keepalives are only ours to set on a connection we own; when the session
+# rides someone else's control master, the master's ServerAlive* settings
+# apply (the installer's recommended config sets them) and the watchdog below
+# is what notices. All overridable from the environment.
+KEEPALIVE_INTERVAL="${NVIM_SCREEN_KEEPALIVE_INTERVAL:-15}"
+KEEPALIVE_COUNT="${NVIM_SCREEN_KEEPALIVE_COUNT:-3}"
+WATCHDOG_ENABLED="${NVIM_SCREEN_WATCHDOG:-1}"
+WATCHDOG_TICK="${NVIM_SCREEN_WATCHDOG_TICK:-3}"
+# Ticks between end-to-end probes of the host (0 disables them)
+DEEP_PROBE_EVERY="${NVIM_SCREEN_DEEP_PROBE_EVERY:-10}"
+DEEP_PROBE_TIMEOUT="${NVIM_SCREEN_DEEP_PROBE_TIMEOUT:-15}"
+DEEP_PROBE_FAILURES="${NVIM_SCREEN_DEEP_PROBE_FAILURES:-2}"
 
 # Prefix key for in-session commands, GNU screen style: <prefix> d detaches.
 # Handed to the session's Neovim through the environment and honoured by the
@@ -210,6 +303,150 @@ connect_ssh_host() {
     fi
 
     remember_ssh_host "$ssh_host"
+}
+
+# --------------------------------------------------------------------------
+# Attached remote sessions
+#
+# 'ssh -t <host> nvim-screen -r ...' hands the terminal to a Neovim TUI on
+# the far side. Everything that makes a terminal come back afterwards lives
+# here: the ssh runs as a supervised background job (so our signal traps can
+# still fire while it is stuck), a watchdog notices a dead link instead of
+# waiting for TCP, and the terminal is restored the moment control returns,
+# whatever killed the session.
+# --------------------------------------------------------------------------
+
+WATCHDOG_PID=""
+
+# The link is gone: take the ssh client down so the script regains control
+# and can put the terminal back.
+declare_link_lost() {
+    local flag="$1" ssh_pid="$2"
+
+    : > "$flag"
+    # SIGTERM first - a client that is still responsive resets the terminal
+    # on its own way out, which is tidier than us doing it after the fact.
+    kill -TERM "$ssh_pid" 2>/dev/null || true
+    sleep 1
+    kill -KILL "$ssh_pid" 2>/dev/null || true
+}
+
+# Watch the link for as long as the session is attached. Only useful when the
+# session is multiplexed over a control master: the master's health is a
+# local, instant question, and a session whose master has gone is a session
+# that will never come back. On an unmultiplexed connection there is nothing
+# to ask that would not cost a fresh login, so the ssh client's own
+# ServerAlive* settings (set below) do the job instead.
+start_link_watchdog() {
+    local ssh_host="$1" ssh_pid="$2" flag="$3"
+
+    [[ "$WATCHDOG_ENABLED" == "0" ]] && return 0
+
+    (
+        ticks=0
+        deep_fails=0
+
+        while kill -0 "$ssh_pid" 2>/dev/null; do
+            sleep "$WATCHDOG_TICK"
+            kill -0 "$ssh_pid" 2>/dev/null || exit 0
+
+            if ! ssh_master_running "$ssh_host"; then
+                declare_link_lost "$flag" "$ssh_pid"
+                exit 0
+            fi
+
+            # Backstop for a master that is alive but wedged: an actual round
+            # trip. Rare, so it runs on a slow cadence.
+            ticks=$((ticks + 1))
+            if [[ "$DEEP_PROBE_EVERY" -gt 0 ]] && [[ $((ticks % DEEP_PROBE_EVERY)) -eq 0 ]]; then
+                if ${TIMEOUT_CMD:+$TIMEOUT_CMD $DEEP_PROBE_TIMEOUT} \
+                    ssh -o BatchMode=yes "$ssh_host" true 2>/dev/null; then
+                    deep_fails=0
+                else
+                    deep_fails=$((deep_fails + 1))
+                    if [[ $deep_fails -ge $DEEP_PROBE_FAILURES ]]; then
+                        declare_link_lost "$flag" "$ssh_pid"
+                        exit 0
+                    fi
+                fi
+            fi
+        done
+    ) </dev/null >/dev/null 2>&1 &
+
+    WATCHDOG_PID=$!
+}
+
+stop_link_watchdog() {
+    [[ -n "$WATCHDOG_PID" ]] || return 0
+    kill -TERM "$WATCHDOG_PID" 2>/dev/null || true
+    wait "$WATCHDOG_PID" 2>/dev/null || true
+    WATCHDOG_PID=""
+}
+
+# Run an interactive command on a remote host, supervising the link and the
+# terminal for as long as it runs. Returns ssh's status, or 255 when the
+# watchdog had to cut the connection.
+ssh_interactive() {
+    local ssh_host="$1" remote_cmd="$2"
+    local status=0 had_master=0 flag
+
+    ssh_master_running "$ssh_host" && had_master=1
+
+    flag="$SESSION_DIR/.link-lost.$$"
+    rm -f "$flag"
+
+    # -e '~' asks for the usual ssh escape character explicitly, so
+    # 'Enter ~ .' drops you back to the local shell without waiting for
+    # anything. NVIM_SCREEN_SSH_DIRECT=1 forces an unmultiplexed connection:
+    # it costs another authentication, but then escape handling and
+    # keepalives are this client's own business, which older OpenSSH builds
+    # do not do for a multiplexed session.
+    local ssh_opts=(-t -e '~')
+    if [[ "${NVIM_SCREEN_SSH_DIRECT:-0}" == "1" ]]; then
+        ssh_opts+=(-o ControlPath=none -o ControlMaster=no)
+        had_master=0
+    fi
+    if [[ $had_master -eq 0 ]]; then
+        # Our own connection, so our own keepalives: without them a dead
+        # network freezes the terminal until TCP gives up, minutes later.
+        ssh_opts+=(-o ServerAliveInterval="$KEEPALIVE_INTERVAL"
+                   -o ServerAliveCountMax="$KEEPALIVE_COUNT"
+                   -o TCPKeepAlive=yes)
+    fi
+
+    arm_terminal_guard
+
+    # ssh has to be a background job: only then does 'wait' stay
+    # interruptible and our signal traps get a chance to run while ssh is
+    # stuck. A background job in a non-interactive shell gets /dev/null for
+    # stdin, so the terminal is handed over explicitly.
+    if [[ -t 0 ]]; then
+        exec 3<&0
+        ssh "${ssh_opts[@]}" "$ssh_host" "$remote_cmd" <&3 &
+        SSH_ATTACH_PID=$!
+        exec 3<&-
+    elif have_tty; then
+        ssh "${ssh_opts[@]}" "$ssh_host" "$remote_cmd" </dev/tty &
+        SSH_ATTACH_PID=$!
+    else
+        ssh "${ssh_opts[@]}" "$ssh_host" "$remote_cmd" &
+        SSH_ATTACH_PID=$!
+    fi
+
+    [[ $had_master -eq 1 ]] && start_link_watchdog "$ssh_host" "$SSH_ATTACH_PID" "$flag"
+
+    wait "$SSH_ATTACH_PID" || status=$?
+    SSH_ATTACH_PID=""
+    stop_link_watchdog
+
+    cleanup_terminal
+    disarm_terminal_guard
+
+    if [[ -f "$flag" ]]; then
+        rm -f "$flag"
+        return 255
+    fi
+    return $status
 }
 
 # Function to run nvim-screen on a remote host. Uses ssh_exec, not ssh_query:
@@ -430,11 +667,21 @@ run_client() {
     local socket_path
     socket_path=$(get_socket_path "$session_name")
 
+    # Evict clients that are still attached. After a dropped connection the
+    # previous UI usually lingers - its transport is gone but Neovim has not
+    # noticed - and Neovim sizes the screen to the smallest attached UI, so
+    # that leftover is exactly what makes a reattached session look mangled.
+    # NVIM_SCREEN_SHARE=1 attaches alongside other clients instead.
+    if [[ "${NVIM_SCREEN_SHARE:-0}" != "1" ]]; then
+        nvim --headless --server "$socket_path" \
+            --remote-expr "$DETACH_UIS_LUA" &>/dev/null || true
+    fi
+
     # Returns when this client detaches or the session ends
-    TERMINAL_HANDED_OVER=1
+    arm_terminal_guard
     nvim --server "$socket_path" --remote-ui || true
     cleanup_terminal
-    TERMINAL_HANDED_OVER=0
+    disarm_terminal_guard
 
     if [[ -S "$socket_path" ]] && check_socket_health "$socket_path"; then
         echo "[detached from $session_name]"
@@ -477,13 +724,10 @@ start_session() {
 
         # Run the remote nvim-screen over SSH with a pseudo-terminal. The
         # exit status is captured rather than left to 'set -e' so the
-        # terminal is restored right here even when the connection itself
+        # terminal is restored on the way out even when the connection itself
         # dies (ssh exits 255) with nvim still owning the screen.
         local status=0
-        TERMINAL_HANDED_OVER=1
-        ssh -t "$ssh_host" "$remote_cmd" || status=$?
-        cleanup_terminal
-        TERMINAL_HANDED_OVER=0
+        ssh_interactive "$ssh_host" "$remote_cmd" || status=$?
         if [[ $status -eq 255 ]]; then
             echo "[connection to $ssh_host lost - session keeps running, reattach with '$(basename "$0") -r $ssh_host:$session_name']"
         fi
@@ -560,11 +804,8 @@ attach_session() {
         # right here even when the connection itself dies (ssh exits 255)
         # with nvim still owning the screen.
         local status=0
-        TERMINAL_HANDED_OVER=1
-        ssh -t "$ssh_host" \
+        ssh_interactive "$ssh_host" \
             "$REMOTE_PATH nvim-screen -r '$base_session_name'" || status=$?
-        cleanup_terminal
-        TERMINAL_HANDED_OVER=0
         if [[ $status -eq 255 ]]; then
             echo "[connection to $ssh_host lost - session keeps running, reattach with '$(basename "$0") -r $session_name']"
         fi
@@ -785,6 +1026,12 @@ to change it):
   <prefix> a               Send the prefix key itself
   :Detach                  Same as <prefix> d
   :q, :qa, ZZ, ...         Ordinary Neovim quits; the last one ends the session
+
+When a remote connection drops:
+  Enter ~ .                SSH escape - drops you straight back to your shell
+  (nothing)                The link watchdog does the same within ~30s, and
+                           the terminal is restored either way
+  -fix                     Repair a terminal that was left garbled anyway
 
 Session sockets are stored in: $SESSION_DIR
 EOF
@@ -1021,7 +1268,7 @@ main() {
             # the requested action
             TERMINAL_HANDED_OVER=1
             cleanup_terminal
-            TERMINAL_HANDED_OVER=0
+            disarm_terminal_guard
             echo "Terminal restored."
             ;;
     esac

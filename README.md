@@ -176,21 +176,54 @@ own. With it, the first connection carries every one that follows, and
 `ServerAlive*` is what makes a dropped link get noticed in seconds rather
 than minutes. The installer prints the same snippet.
 
+### When the connection drops
+
+Your session lives on the host, not in the connection, so nothing is lost —
+but the terminal you were typing into has to come back. Two things make sure
+it does.
+
+**The dead link gets noticed.** Left alone, `ssh` sits in a TCP retransmit
+loop for minutes after the network goes away, and for all of those minutes
+your terminal is frozen inside Neovim's alternate screen with no way out.
+So the connection is supervised:
+
+- on a connection nvim-screen opens itself, `ServerAliveInterval`/
+  `ServerAliveCountMax` make it give up in about 45s
+- on a connection multiplexed over your control master, those are the
+  master's business, and a watchdog beside the attached session notices when
+  the master dies (or is alive but no longer carrying anything) and drops you
+  back to your shell
+- `Enter` `~` `.` — ssh's own escape — works at any time, and never waits
+
+**The terminal gets put back.** Raw mode, the alternate screen, mouse
+reporting, bracketed paste, focus reporting, the kitty keyboard protocol,
+`modifyOtherKeys`, the scrolling region, auto-wrap and the alternate
+character sets are all unwound on every exit path — clean detach, killed
+client, dropped link, or a signal to nvim-screen itself. Your terminal
+settings are restored to exactly what they were; the screen and scrollback
+are deliberately left alone (no `tput reset`, no RIS). The reset is written
+to `/dev/tty`, so it lands even when output was redirected.
+
+Reattaching evicts any client that is still attached: Neovim sizes the
+screen to the smallest attached UI, so a leftover client from a dropped
+connection is what makes a reattached session look mangled. Set
+`NVIM_SCREEN_SHARE=1` to attach alongside existing clients instead.
+
+Environment knobs: `NVIM_SCREEN_KEEPALIVE_INTERVAL` (15),
+`NVIM_SCREEN_KEEPALIVE_COUNT` (3), `NVIM_SCREEN_WATCHDOG` (1, set to 0 to
+disable), `NVIM_SCREEN_WATCHDOG_TICK` (3), `NVIM_SCREEN_DEEP_PROBE_EVERY`
+(10 ticks, 0 disables), `NVIM_SCREEN_SSH_DIRECT` (1 forces an unmultiplexed
+connection so this client handles escapes and keepalives itself).
+
 ## Troubleshooting
 
-**Terminal prints garbage after a dropped SSH connection.** When the
-connection dies while nvim owns the screen, the terminal emulator is left in
-modes nvim never got to switch off — the kitty keyboard protocol (every
-keypress then prints `[27u`-style sequences, which is also why typing
-`reset` into the wreckage often goes nowhere), mouse reporting, bracketed
-paste, the alternate screen. nvim-screen restores all of this automatically
-the moment `ssh` returns, and the session itself keeps running server-side —
-just reattach with `nvim-screen -r host:name`.
-
-If a terminal is already stuck (older nvim-screen, or the process was
-force-killed before its cleanup could run), run `nvim-screen -fix` in it.
-The keystrokes may echo as garbage, but they still reach the shell — press
-Enter and the command runs.
+**Terminal prints garbage after a dropped SSH connection.** Run
+`nvim-screen -fix` in it. The keystrokes may echo as garbage, but they still
+reach the shell — press Enter and the command runs. This should not be
+needed for a session nvim-screen was supervising (see
+[When the connection drops](#when-the-connection-drops)); it is there for a
+terminal wrecked some other way — an older nvim-screen, a force-quit
+emulator, or a full-screen program that was not nvim-screen at all.
 
 ## Requirements
 
