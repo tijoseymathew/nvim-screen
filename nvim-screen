@@ -68,6 +68,12 @@ SSH_HOSTS_FILE="$SESSION_DIR/ssh-hosts"
 QUERY_TIMEOUT="${NVIM_SCREEN_QUERY_TIMEOUT:-10}"
 CONNECT_TIMEOUT="${NVIM_SCREEN_CONNECT_TIMEOUT:-5}"
 
+# Prefix key for in-session commands, GNU screen style: <prefix> d detaches.
+# Handed to the session's Neovim through the environment and honoured by the
+# default init.lua, so the key is configured here for both. Written in
+# Neovim's key notation.
+SCREEN_PREFIX="${NVIM_SCREEN_PREFIX:-<C-a>}"
+
 # Remote invocations must not rely on the login shell's PATH: non-interactive
 # SSH commands often miss ~/.local/bin, where nvim-screen installs itself.
 REMOTE_PATH='PATH="$HOME/.local/bin:$PATH"'
@@ -451,7 +457,11 @@ start_session() {
 
     if [[ -n "$ssh_host" ]]; then
         # Start remote session via SSH
-        local remote_cmd="$REMOTE_PATH nvim-screen -S '$session_name'"
+        # The prefix key travels with the invocation, so a locally
+        # configured NVIM_SCREEN_PREFIX applies to remote sessions too
+        local remote_cmd
+        printf -v remote_cmd '%s NVIM_SCREEN_PREFIX=%q nvim-screen -S %q' \
+            "$REMOTE_PATH" "$SCREEN_PREFIX" "$session_name"
         if [[ -n "$workdir" ]]; then
             printf -v remote_cmd '%s -c %q' "$remote_cmd" "$workdir"
         fi
@@ -499,9 +509,11 @@ start_session() {
     server_cmd+=(${nvim_args[@]+"${nvim_args[@]}"})
 
     if command -v setsid &>/dev/null; then
-        NVIM_SCREEN_SESSION="$session_name" setsid "${server_cmd[@]}" </dev/null &>/dev/null &
+        NVIM_SCREEN_SESSION="$session_name" NVIM_SCREEN_PREFIX="$SCREEN_PREFIX" \
+            setsid "${server_cmd[@]}" </dev/null &>/dev/null &
     else
-        NVIM_SCREEN_SESSION="$session_name" nohup "${server_cmd[@]}" </dev/null &>/dev/null &
+        NVIM_SCREEN_SESSION="$session_name" NVIM_SCREEN_PREFIX="$SCREEN_PREFIX" \
+            nohup "${server_cmd[@]}" </dev/null &>/dev/null &
     fi
 
     # Wait for the server socket to appear
@@ -767,10 +779,12 @@ Examples:
   $(basename "$0") -- -O file1.txt file2.txt       # Start session with vertical split
   $(basename "$0") -S test -- -c 'set number'      # Start session with nvim command
 
-Inside Neovim:
-  :q (and :qa, ZZ, ...)    Detach when the quit would end the session
-  :Detach                  Detach all clients (session keeps running)
-  :Quit                    Actually end the session
+Inside Neovim (GNU screen style; prefix is $SCREEN_PREFIX, set NVIM_SCREEN_PREFIX
+to change it):
+  <prefix> d               Detach; the session keeps running
+  <prefix> a               Send the prefix key itself
+  :Detach                  Same as <prefix> d
+  :q, :qa, ZZ, ...         Ordinary Neovim quits; the last one ends the session
 
 Session sockets are stored in: $SESSION_DIR
 EOF

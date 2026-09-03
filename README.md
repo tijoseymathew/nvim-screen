@@ -54,7 +54,7 @@ there is no terminal to ask on).
 curl -fsSL https://raw.githubusercontent.com/tijoseymathew/nvim-screen/main/nvim-screen -o ~/.local/bin/nvim-screen
 chmod +x ~/.local/bin/nvim-screen
 
-# Optionally install default config for quit interception
+# Optionally install default config for the screen-style detach binding
 mkdir -p ~/.config/nvim-screen
 curl -fsSL https://raw.githubusercontent.com/tijoseymathew/nvim-screen/main/init.lua -o ~/.config/nvim-screen/init.lua
 ```
@@ -79,10 +79,11 @@ nvim-screen there automatically (see below).
 | `nvim-screen -h` | Show help |
 
 Inside Neovim:
-- `:q`, `:qa`, `:wq`, `ZZ`, ... — detach when the quit would end the session;
-  otherwise they close the window as usual
-- `:Detach` — detach all clients explicitly
-- `:Quit` — actually end the session
+- `Ctrl+a` `d` — detach; the session keeps running (GNU screen's binding)
+- `Ctrl+a` `a` — send a literal `Ctrl+a`
+- `:Detach` — the same thing from the command line
+- `:q`, `:qa`, `:wq`, `ZZ`, ... — ordinary Neovim quits; the last one ends the
+  session, exactly as they would outside nvim-screen
 
 ## How it works
 
@@ -96,16 +97,25 @@ Uses Neovim's native client-server features:
 
 Single bash script. No dependencies beyond standard Unix tools.
 
-### Quit interception
+### Detaching
 
-The default config (`~/.config/nvim-screen/init.lua`) rewrites quit commands
-on the command line before they execute (`QuitPre`/`ExitPre` autocommands
-cannot abort an exit, so rewriting is the only reliable interception point):
+The default config (`~/.config/nvim-screen/init.lua`) adds a prefix key in
+GNU screen's style. `Ctrl+a` then `d` detaches: the client goes away, the
+session and everything running in it stay.
 
-- A quit that only closes a window or tab runs unchanged
-- A quit that would end the session (`:q` on the last window, `:qa`, `ZZ`, ...)
-  writes files if asked (`:wq`, `:x`) and then **detaches** instead
-- `:Quit` (or `nvim-screen -k <name>` from the shell) ends the session for real
+- `Ctrl+a` `d` — detach
+- `Ctrl+a` `a` — send a literal `Ctrl+a` (screen's escape convention), so the
+  increment command is still one keystroke away
+- `:Detach` — same action, for when your hands are already on `:`
+- bare `Ctrl+a` is left unmapped, so after `timeoutlen` it still increments
+  the number under the cursor
+- `NVIM_SCREEN_PREFIX` changes the prefix (Neovim key notation, e.g.
+  `NVIM_SCREEN_PREFIX='<C-b>'`); nvim-screen passes it to the session, local
+  or remote
+
+Quit commands are not intercepted: `:q`, `:qa`, `:wq` and `ZZ` mean what they
+always mean, and the last one ends the session — as does
+`nvim-screen -k <name>` from the shell.
 
 To disable, delete the config file. The init script is pure Lua with full
 access to Neovim's API — add any custom session initialization you want.

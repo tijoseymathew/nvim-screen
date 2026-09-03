@@ -1,16 +1,27 @@
 -- nvim-screen default initialization
 -- Sourced by the nvim-screen server when a session starts.
 --
--- Makes quit commands screen-like: a quit that would end the session
--- detaches your client instead, keeping the session alive. Quits that
--- only close a window/tab behave as usual.
+-- Detaching follows GNU screen's convention: a prefix key, then a command.
+-- Quit commands are left alone and mean what they have always meant.
 --
---   :q, :qa, :wq, ZZ, ...   detach when they would end the session
---   :Detach                 detach all clients explicitly
---   :Quit[!]                actually end the session
+--   <prefix> d              detach; the session keeps running
+--   <prefix> a              send the prefix key itself (screen's convention)
+--   :Detach                 same as <prefix> d, from the command line
+--   :q, :qa, :wq, ZZ, ...   ordinary Neovim quits - the last one ends the session
 --   nvim-screen -k <name>   end the session from the shell
+--
+-- The prefix defaults to Ctrl+a and is set by the nvim-screen script through
+-- $NVIM_SCREEN_PREFIX, so it is configured in one place for both. Bare
+-- <prefix> is deliberately left unmapped: after 'timeoutlen' it falls through
+-- to whatever it normally does (Ctrl+a increments the number under the
+-- cursor), and <prefix> a does the same thing without the wait.
 
 local augroup = vim.api.nvim_create_augroup("NvimScreen", { clear = true })
+
+local prefix = vim.env.NVIM_SCREEN_PREFIX
+if prefix == nil or prefix == "" then
+	prefix = "<C-a>"
+end
 
 -- Detach every attached UI client; the session keeps running.
 local function detach_uis()
@@ -24,70 +35,27 @@ local function detach_uis()
 	return closed
 end
 
--- Count normal (non-floating) windows across all tabpages.
-local function normal_window_count()
-	local count = 0
-	for _, win in ipairs(vim.api.nvim_list_wins()) do
-		if vim.api.nvim_win_get_config(win).relative == "" then
-			count = count + 1
-		end
-	end
-	return count
-end
-
-vim.api.nvim_create_user_command("Detach", function()
+local function detach()
 	if detach_uis() == 0 then
 		vim.notify("nvim-screen: no attached clients", vim.log.levels.WARN)
 	end
-end, { desc = "nvim-screen: detach all clients, keep session running" })
-
-vim.api.nvim_create_user_command("Quit", function(opts)
-	vim.cmd("qall" .. (opts.bang and "!" or ""))
-end, { bang = true, desc = "nvim-screen: end the session" })
-
--- Smart quit, invoked by the abbreviations below with the original command
--- as its argument (e.g. "q", "wq!", "qa"). A quit that only closes a window
--- runs unchanged; a quit that would end the session detaches instead.
-vim.api.nvim_create_user_command("NvimScreenQuit", function(opts)
-	local arg = opts.args
-	local bang = arg:sub(-1) == "!"
-	local cmd = bang and arg:sub(1, -2) or arg
-	local all = cmd:match("a") ~= nil -- qa, qall, wqa, xall, quitall
-	local write = cmd:match("[wx]") ~= nil -- wq, wqa, x, xall
-
-	if not all and normal_window_count() > 1 then
-		vim.cmd(arg) -- just closes a window or tab, session unaffected
-		return
-	end
-
-	-- This quit would end the session: write if asked, then detach.
-	if write then
-		local ok, err = pcall(vim.cmd, all and "wall" or "update")
-		if not ok then
-			vim.api.nvim_err_writeln(err)
-			return
-		end
-	end
-	detach_uis()
-end, { nargs = 1 })
-
--- Rewrite quit commands on the command line before they run. This is the
--- only reliable interception point: QuitPre/ExitPre autocommands cannot
--- abort an exit, so by the time they fire the session is already dying.
-function _G.nvim_screen_expand_quit(lhs)
-	if vim.fn.getcmdtype() == ":" and vim.fn.getcmdline() == lhs then
-		return "NvimScreenQuit " .. lhs
-	end
-	return lhs
 end
 
-for _, lhs in ipairs({ "q", "quit", "qa", "qall", "quitall", "wq", "wqa", "x", "xall" }) do
-	vim.cmd(("cnoreabbrev <expr> %s v:lua.nvim_screen_expand_quit('%s')"):format(lhs, lhs))
-end
+vim.api.nvim_create_user_command("Detach", detach, {
+	desc = "nvim-screen: detach all clients, keep session running",
+})
 
--- Normal-mode quits.
-vim.keymap.set("n", "ZZ", "<Cmd>NvimScreenQuit x<CR>", { desc = "nvim-screen: smart ZZ" })
-vim.keymap.set("n", "ZQ", "<Cmd>NvimScreenQuit q!<CR>", { desc = "nvim-screen: smart ZQ" })
+vim.keymap.set("n", prefix .. "d", detach, {
+	desc = "nvim-screen: detach (session keeps running)",
+})
+
+-- Screen's escape convention: the prefix twice-over sends the key itself.
+vim.keymap.set("n", prefix .. "a", prefix, {
+	desc = "nvim-screen: send " .. prefix,
+})
+
+-- "<C-a>" reads as "Ctrl+a" in the hint below.
+local prefix_label = prefix:gsub("^<[Cc]%-(.)>$", "Ctrl+%1")
 
 -- Greet each client that attaches.
 vim.api.nvim_create_autocmd("UIEnter", {
@@ -96,7 +64,10 @@ vim.api.nvim_create_autocmd("UIEnter", {
 		local name = vim.env.NVIM_SCREEN_SESSION
 		vim.defer_fn(function()
 			vim.notify(
-				("nvim-screen%s: :q detaches, :Quit ends the session"):format(name and (" [" .. name .. "]") or ""),
+				("nvim-screen%s: %s d (or :Detach) detaches, :qa ends the session"):format(
+					name and (" [" .. name .. "]") or "",
+					prefix_label
+				),
 				vim.log.levels.INFO
 			)
 		end, 50)
