@@ -54,8 +54,19 @@ VERSION="0.4.4"
 USER="${USER:-$(whoami)}"
 SESSION_DIR="${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-${USER}"
 SOCKET_PREFIX="nvim-session"
-SSH_CONTROL_PREFIX="ssh-control"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nvim-screen"
+
+# Hosts this user has reached through nvim-screen, one per line. Connection
+# multiplexing is the system's business now (see 'Remote hosts' below), so
+# there are no control sockets of ours left to enumerate - this file is what
+# tells '-ls' and session lookup which hosts are worth asking.
+SSH_HOSTS_FILE="$SESSION_DIR/ssh-hosts"
+
+# Time limit for the short, non-interactive remote queries: session lookups,
+# '-ls', the remote version check. Without one, a host that has gone away
+# hangs the command instead of reporting itself.
+QUERY_TIMEOUT="${NVIM_SCREEN_QUERY_TIMEOUT:-10}"
+CONNECT_TIMEOUT="${NVIM_SCREEN_CONNECT_TIMEOUT:-5}"
 
 # Remote invocations must not rely on the login shell's PATH: non-interactive
 # SSH commands often miss ~/.local/bin, where nvim-screen installs itself.
@@ -94,38 +105,66 @@ get_init_script() {
     fi
 }
 
-# Function to sanitize a hostname for use in filenames
-sanitize_host() {
-    echo "${1//[^a-zA-Z0-9._-]/_}"
-}
+# --------------------------------------------------------------------------
+# Remote hosts
+#
+# nvim-screen does not run a control master of its own. Multiplexing is a
+# property of the connection, not of this tool: whether repeated commands
+# re-authenticate is decided by ControlMaster/ControlPath/ControlPersist in
+# the user's own ~/.ssh/config, where it also benefits scp, rsync, git and
+# every other ssh caller. Every invocation below is a plain 'ssh <host>', so
+# it picks up whatever that config says - including a master someone else
+# already started.
+#
+# The installer prints a recommended 'Host *' block; without one, remote
+# commands simply authenticate each time.
+# --------------------------------------------------------------------------
 
-# Function to get SSH control master socket path
-get_ssh_control_path() {
+# Record a host we have talked to, so '-ls' and session lookup know where to
+# look later. Written once per host; the file is per-user and lives beside
+# the session sockets, so it goes away with them on reboot.
+remember_ssh_host() {
     local ssh_host="$1"
-    echo "$SESSION_DIR/${SSH_CONTROL_PREFIX}-$(sanitize_host "$ssh_host").sock"
+    [[ -n "$ssh_host" ]] || return 0
+    if [[ -f "$SSH_HOSTS_FILE" ]] && grep -qxF "$ssh_host" "$SSH_HOSTS_FILE" 2>/dev/null; then
+        return 0
+    fi
+    echo "$ssh_host" >> "$SSH_HOSTS_FILE"
 }
 
-# Function to get hostname from SSH control socket path
-get_host_from_control_path() {
-    local control_path="$1"
-    local filename="${control_path##*/}"
-    local safe_host="${filename#${SSH_CONTROL_PREFIX}-}"
-    safe_host="${safe_host%.sock}"
-    # Reverse the sanitization (best effort, may not be perfect)
-    echo "$safe_host"
-}
-
-# Function to get all active SSH hosts, one per line
+# Function to get all known SSH hosts, one per line
 get_active_ssh_hosts() {
-    local control_socket host
-    for control_socket in "$SESSION_DIR"/${SSH_CONTROL_PREFIX}-*.sock; do
-        if [[ -S "$control_socket" ]]; then
-            host=$(get_host_from_control_path "$control_socket")
-            if check_ssh_control_master "$control_socket" 2>/dev/null; then
-                echo "$host"
-            fi
-        fi
-    done
+    [[ -f "$SSH_HOSTS_FILE" ]] || return 0
+    sort -u "$SSH_HOSTS_FILE" 2>/dev/null || true
+}
+
+# True when the system's ssh config already has a live master for this host.
+# Purely local and instant, so it is safe to ask before doing anything that
+# must not block. Returns false when the user has no multiplexing configured
+# at all, which is not an error - it just means queries pay for a connection.
+ssh_master_running() {
+    local ssh_host="$1"
+    ${TIMEOUT_CMD:+$TIMEOUT_CMD 2} ssh -O check "$ssh_host" 2>&1 \
+        | grep -q "Master running"
+}
+
+# Function to execute a command via SSH. Interactive-capable: this is the
+# path a user-initiated action takes, so ssh may prompt for a passphrase.
+ssh_exec() {
+    local ssh_host="$1"
+    shift
+    ssh -o ConnectTimeout="$CONNECT_TIMEOUT" "$ssh_host" "$@"
+}
+
+# Function to run a short read-only query on a remote host. Time-limited and
+# non-interactive, so a host that has gone away reports itself instead of
+# hanging -ls or a session lookup, and a host that would need a password is
+# skipped rather than prompting in the middle of a listing.
+ssh_query() {
+    local ssh_host="$1"
+    shift
+    ${TIMEOUT_CMD:+$TIMEOUT_CMD $QUERY_TIMEOUT} \
+        ssh -o BatchMode=yes -o ConnectTimeout="$CONNECT_TIMEOUT" "$ssh_host" "$@"
 }
 
 # Function to find which remote host has a session
@@ -133,12 +172,12 @@ find_remote_session() {
     local session_name="$1"
     local hosts=() host
     while IFS= read -r host; do
-        hosts+=("$host")
+        [[ -n "$host" ]] && hosts+=("$host")
     done < <(get_active_ssh_hosts)
 
     for host in ${hosts[@]+"${hosts[@]}"}; do
         # Check if session exists on this host
-        if ssh_exec "$host" "[ -S \"\${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-\$USER/nvim-session-$session_name.sock\" ]" 2>/dev/null; then
+        if ssh_query "$host" "[ -S \"\${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-\$USER/nvim-session-$session_name.sock\" ]" 2>/dev/null; then
             echo "$host"
             return 0
         fi
@@ -147,90 +186,29 @@ find_remote_session() {
     return 1
 }
 
-# Function to check if SSH control master is active
-check_ssh_control_master() {
-    local control_path="$1"
-    # Hostname is not actually needed - the socket contains the connection info
-    # Using a dummy value since SSH ignores it when using control master
-    # Cap the check so a stale socket can't hang us. 'timeout' is GNU
-    # coreutils and is absent on stock macOS, so fall back to running the
-    # check unguarded rather than failing every lookup with 'command not found'.
-    ${TIMEOUT_CMD:+$TIMEOUT_CMD 2} ssh -O check -S "$control_path" dummy 2>&1 \
-        | grep -q "Master running"
-    return $?
-}
-
-# Function to establish SSH control master
-establish_ssh_control_master() {
+# Function to open (or reuse) a connection to a host and remember it.
+# With multiplexing configured this warms the master, so the commands that
+# follow are free; without it, this is just an early reachability check that
+# fails before we start pushing scripts around.
+connect_ssh_host() {
     local ssh_host="$1"
-    local control_path
-    control_path=$(get_ssh_control_path "$ssh_host")
 
-    # Check if control master already exists and is working
-    if [[ -S "$control_path" ]] && check_ssh_control_master "$control_path"; then
+    if ssh_master_running "$ssh_host"; then
+        remember_ssh_host "$ssh_host"
         return 0
     fi
 
-    # A dead control socket would make ssh refuse to create a new master
-    rm -f "$control_path"
-
-    # Establish new control master in background
-    ssh -fNM -S "$control_path" \
-        -o ControlPersist=yes \
-        -o ServerAliveInterval=60 \
-        -o ServerAliveCountMax=3 \
-        "$ssh_host" 2>&1
-
-    if [[ $? -ne 0 ]]; then
-        echo -e "${RED}Failed to establish SSH connection to $ssh_host${NC}"
+    if ! ssh_exec "$ssh_host" true; then
+        echo -e "${RED}Failed to connect to $ssh_host${NC}"
         return 1
     fi
 
-    # Verify the control master is working
-    sleep 0.5
-    if check_ssh_control_master "$control_path"; then
-        return 0
-    else
-        echo -e "${RED}SSH control master established but not responding${NC}"
-        return 1
-    fi
+    remember_ssh_host "$ssh_host"
 }
 
-# Function to terminate the master process behind a control socket.
-# 'ssh -O exit' alone is not enough: some OpenSSH versions acknowledge the
-# request but leave the master (and any listeners it holds) running.
-terminate_ssh_master() {
-    local control_path="$1"
-    local master_pid
-
-    master_pid=$(ssh -O check -S "$control_path" dummy 2>&1 \
-        | grep -o 'pid=[0-9]*' | cut -d= -f2 || true)
-    ssh -O exit -S "$control_path" dummy &>/dev/null || true
-
-    if [[ "$master_pid" =~ ^[0-9]+$ ]]; then
-        sleep 0.2
-        if kill -0 "$master_pid" 2>/dev/null; then
-            kill "$master_pid" 2>/dev/null || true
-            sleep 0.2
-            kill -0 "$master_pid" 2>/dev/null && kill -9 "$master_pid" 2>/dev/null
-        fi
-    fi
-    rm -f "$control_path"
-}
-
-# Function to execute command via SSH using control master
-ssh_exec() {
-    local ssh_host="$1"
-    shift
-    local control_path
-    control_path=$(get_ssh_control_path "$ssh_host")
-
-    # Hostname not needed - socket contains connection info
-    # But we still accept it as parameter for backwards compatibility
-    ssh -S "$control_path" dummy "$@"
-}
-
-# Function to run nvim-screen on a remote host
+# Function to run nvim-screen on a remote host. Uses ssh_exec, not ssh_query:
+# these are actions the user asked for, so ssh must be free to prompt for a
+# passphrase on a host that has no multiplexed connection to ride on.
 remote_screen() {
     local ssh_host="$1"
     shift
@@ -400,7 +378,9 @@ list_sessions() {
         fi
     done
 
-    # List sessions on all active remote hosts
+    # List sessions on every host we have connected to. Each query is
+    # non-interactive and time-limited, so a host that is unreachable (or
+    # that would want a password) is skipped instead of hanging the listing.
     local hosts=() host
     while IFS= read -r host; do
         hosts+=("$host")
@@ -410,7 +390,7 @@ list_sessions() {
         if [[ -n "$host" ]]; then
             # Get remote sessions
             local remote_sessions
-            remote_sessions=$(ssh_exec "$host" "
+            remote_sessions=$(ssh_query "$host" "
                 for socket in \"\${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-\$USER\"/nvim-session-*.sock; do
                     if [[ -S \"\$socket\" ]]; then
                         name=\"\${socket##*/}\"
@@ -491,7 +471,7 @@ start_session() {
         # dies (ssh exits 255) with nvim still owning the screen.
         local status=0
         TERMINAL_HANDED_OVER=1
-        ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy "$remote_cmd" || status=$?
+        ssh -t "$ssh_host" "$remote_cmd" || status=$?
         cleanup_terminal
         TERMINAL_HANDED_OVER=0
         if [[ $status -eq 255 ]]; then
@@ -552,8 +532,7 @@ attach_session() {
 
         echo "Attaching to remote session '$base_session_name' on $ssh_host..."
 
-        # Establish SSH control master if not already active
-        if ! establish_ssh_control_master "$ssh_host"; then
+        if ! connect_ssh_host "$ssh_host"; then
             echo -e "${RED}Failed to establish SSH connection${NC}"
             exit 1
         fi
@@ -570,7 +549,7 @@ attach_session() {
         # with nvim still owning the screen.
         local status=0
         TERMINAL_HANDED_OVER=1
-        ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
+        ssh -t "$ssh_host" \
             "$REMOTE_PATH nvim-screen -r '$base_session_name'" || status=$?
         cleanup_terminal
         TERMINAL_HANDED_OVER=0
@@ -610,7 +589,7 @@ detach_session() {
 
         echo "Detaching from remote session '$base_session_name' on $ssh_host..."
 
-        if ! establish_ssh_control_master "$ssh_host"; then
+        if ! connect_ssh_host "$ssh_host"; then
             echo -e "${RED}Failed to establish SSH connection${NC}"
             exit 1
         fi
@@ -637,7 +616,7 @@ detach_session() {
     fi
 
     # Check if this is a remote session
-    ssh_host=$(find_remote_session "$session_name")
+    ssh_host=$(find_remote_session "$session_name" || true)
 
     if [[ -n "$ssh_host" ]]; then
         # For remote session, execute detach on remote host
@@ -662,7 +641,7 @@ kill_session() {
         ssh_host="${BASH_REMATCH[1]}"
         base_session_name="${BASH_REMATCH[2]}"
 
-        if ! establish_ssh_control_master "$ssh_host"; then
+        if ! connect_ssh_host "$ssh_host"; then
             echo -e "${RED}Failed to establish SSH connection${NC}"
             exit 1
         fi
@@ -715,22 +694,36 @@ cleanup_stale_sockets() {
         fi
     done
 
-    # Clean up stale SSH control master sockets
-    for control_socket in "$SESSION_DIR"/${SSH_CONTROL_PREFIX}-*.sock; do
-        if [[ -S "$control_socket" ]]; then
-            # Check if control master is still active
-            if ! check_ssh_control_master "$control_socket" 2>/dev/null; then
-                echo "Removing stale SSH control socket: ${control_socket##*/}"
-                terminate_ssh_master "$control_socket"
+    # Drop hosts that no longer answer. There are no control sockets of ours
+    # to tear down - connections belong to the system's ssh config - so all
+    # that can go stale here is the list of hosts we ask about.
+    if [[ -f "$SSH_HOSTS_FILE" ]]; then
+        local host live=() tmp
+        while IFS= read -r host; do
+            [[ -n "$host" ]] || continue
+            if ssh_query "$host" true 2>/dev/null; then
+                live+=("$host")
+            else
+                echo "Forgetting unreachable host: $host"
                 cleaned=$((cleaned + 1))
             fi
+        done < <(get_active_ssh_hosts)
+
+        tmp=$(mktemp "${SSH_HOSTS_FILE}.XXXXXX") || tmp=""
+        if [[ -n "$tmp" ]]; then
+            if [[ ${#live[@]} -gt 0 ]]; then
+                printf '%s\n' "${live[@]}" > "$tmp"
+            else
+                : > "$tmp"
+            fi
+            mv -f "$tmp" "$SSH_HOSTS_FILE"
         fi
-    done
+    fi
 
     if [[ $cleaned -eq 0 ]]; then
-        echo "No stale sockets found."
+        echo "No stale sessions found."
     else
-        echo "Removed $cleaned stale socket(s)."
+        echo "Cleaned up $cleaned stale item(s)."
     fi
 }
 
@@ -922,8 +915,8 @@ main() {
 
     # Handle SSH connection if specified
     if [[ -n "$ssh_host" ]]; then
-        echo "Establishing SSH connection to $ssh_host..."
-        if ! establish_ssh_control_master "$ssh_host"; then
+        echo "Connecting to $ssh_host..."
+        if ! connect_ssh_host "$ssh_host"; then
             exit 1
         fi
 

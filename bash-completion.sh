@@ -35,7 +35,8 @@ _nvim_screen_completions() {
             ;;
         -c)
             # Complete directories; remote ones when -s <host> was given and
-            # its SSH control master is already alive (never prompts)
+            # the system's ssh config already has a live control master for it
+            # (so completion never opens a connection or prompts)
             local host="" i
             for ((i=1; i < COMP_CWORD; i++)); do
                 if [[ "${COMP_WORDS[i]}" == "-s" ]]; then
@@ -43,12 +44,9 @@ _nvim_screen_completions() {
                 fi
             done
             if [[ -n "$host" ]]; then
-                local safe_host="${host//[^a-zA-Z0-9._-]/_}"
-                local control_socket="$session_dir/ssh-control-${safe_host}.sock"
-                if [[ -S "$control_socket" ]] && \
-                    ssh -O check -S "$control_socket" dummy 2>&1 | grep -q "Master running"; then
+                if ssh -O check "$host" 2>&1 | grep -q "Master running"; then
                     local remote_dirs
-                    remote_dirs=$(ssh -S "$control_socket" dummy \
+                    remote_dirs=$(ssh -o BatchMode=yes "$host" \
                         "bash -c 'compgen -d -S / -- \"$cur\"'" 2>/dev/null)
                     COMPREPLY=( $(compgen -W "$remote_dirs" -- "$cur") )
                 fi
@@ -74,41 +72,36 @@ _nvim_screen_completions() {
                 done
             fi
 
-            # Get remote sessions (host:session format)
-            # This requires checking active SSH control sockets
-            local ssh_control_prefix="ssh-control"
-            if [[ -d "$session_dir" ]]; then
-                for control_socket in "$session_dir"/${ssh_control_prefix}-*.sock; do
-                    if [[ -S "$control_socket" ]]; then
-                        local filename="${control_socket##*/}"
-                        local safe_host="${filename#${ssh_control_prefix}-}"
-                        safe_host="${safe_host%.sock}"
+            # Get remote sessions (host:session format) from the hosts
+            # nvim-screen has connected to. Only hosts whose ssh control
+            # master is already live are asked: completion has to be instant
+            # and must never open a connection or prompt for a password.
+            local hosts_file="$session_dir/ssh-hosts"
+            if [[ -r "$hosts_file" ]]; then
+                local remote_host
+                while IFS= read -r remote_host; do
+                    [[ -n "$remote_host" ]] || continue
+                    ssh -O check "$remote_host" 2>&1 | grep -q "Master running" || continue
 
-                        # Try to get remote sessions from this host
-                        # We use ssh -O check to see if control master is active
-                        if ssh -O check -S "$control_socket" dummy 2>&1 | grep -q "Master running"; then
-                            # Get remote sessions
-                            local remote_sessions
-                            remote_sessions=$(ssh -S "$control_socket" dummy "
-                                for socket in \"\${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-\$USER\"/nvim-session-*.sock; do
-                                    if [[ -S \"\$socket\" ]]; then
-                                        name=\"\${socket##*/}\"
-                                        name=\"\${name#nvim-session-}\"
-                                        name=\"\${name%.sock}\"
-                                        echo \"\$name\"
-                                    fi
-                                done
-                            " 2>/dev/null)
+                    local remote_sessions
+                    remote_sessions=$(ssh -o BatchMode=yes "$remote_host" "
+                        for socket in \"\${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-\$USER\"/nvim-session-*.sock; do
+                            if [[ -S \"\$socket\" ]]; then
+                                name=\"\${socket##*/}\"
+                                name=\"\${name#nvim-session-}\"
+                                name=\"\${name%.sock}\"
+                                echo \"\$name\"
+                            fi
+                        done
+                    " 2>/dev/null)
 
-                            # Add remote sessions with host: prefix
-                            while IFS= read -r session; do
-                                if [[ -n "$session" ]]; then
-                                    sessions="$sessions ${safe_host}:${session}"
-                                fi
-                            done <<< "$remote_sessions"
+                    # Add remote sessions with host: prefix
+                    while IFS= read -r session; do
+                        if [[ -n "$session" ]]; then
+                            sessions="$sessions ${remote_host}:${session}"
                         fi
-                    fi
-                done
+                    done <<< "$remote_sessions"
+                done < "$hosts_file"
             fi
 
             COMPREPLY=( $(compgen -W "${sessions}" -- "${cur}") )

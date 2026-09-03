@@ -122,8 +122,9 @@ nvim-screen -r user@host:myproj         # attach to a remote session
 nvim-screen -k user@host:myproj         # kill a remote session
 ```
 
-- Connections are multiplexed over a persistent SSH control master, so
-  repeated commands don't re-authenticate
+- Connections are plain `ssh`. Whether repeated commands re-authenticate is
+  decided by **your** `~/.ssh/config` — nvim-screen no longer runs a control
+  master of its own (see [Connection multiplexing](#connection-multiplexing))
 - If nvim-screen isn't installed on the host, it is **installed automatically**
   on first connect (the script and your nvim-screen config are pushed over the
   existing SSH connection — the remote only needs Neovim 0.9+), and it is
@@ -134,7 +135,36 @@ nvim-screen -k user@host:myproj         # kill a remote session
   stable build into `~/.local` there, no root required
 - `-c <dir>` sets the session's working directory; when a control master for
   the host is already up, bash completion completes **remote** directories
-- `nvim-screen -ls` lists local sessions and sessions on every connected host
+- `nvim-screen -ls` lists local sessions and sessions on every host you have
+  connected to in this boot; each host is asked non-interactively and with a
+  time limit, so an unreachable one is skipped rather than hanging the listing
+
+### Connection multiplexing
+
+nvim-screen used to start and manage an SSH control master per host. It no
+longer does: multiplexing is a property of the connection, not of this tool,
+and configuring it yourself means `scp`, `rsync`, `git` and everything else
+benefit from the same connection reuse.
+
+Put this in `~/.ssh/config`:
+
+```
+Host *
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h:%p
+    ControlPersist 10m
+    ServerAliveInterval 15
+    ServerAliveCountMax 3
+```
+
+```bash
+mkdir -p ~/.ssh/sockets
+```
+
+Without it, nothing breaks — each remote command just authenticates on its
+own. With it, the first connection carries every one that follows, and
+`ServerAlive*` is what makes a dropped link get noticed in seconds rather
+than minutes. The installer prints the same snippet.
 
 ## Troubleshooting
 
