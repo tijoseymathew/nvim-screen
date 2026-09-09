@@ -1,17 +1,41 @@
 #!/usr/bin/env bash
 
 # Neovim Session Manager - mimics GNU screen interface
-# Usage similar to screen: nvim-session [-S name] [-ls] [-r [name]] [-d name]
+# Usage similar to screen: nvim-screen [-S name] [-ls] [-r [name]] [-d name] [-k name]
+#
+# Portability: targets bash 3.2 (macOS default shell). No mapfile/readarray,
+# no associative arrays, and empty arrays are expanded with the
+# ${arr[@]+"${arr[@]}"} idiom because bash < 4.4 treats "${arr[@]}" on an
+# empty array as an unbound variable under 'set -u'.
 
 set -euo pipefail
 
+# Terminal cleanup function
+cleanup_terminal() {
+    # Reset terminal to sane state
+    # This runs on exit to fix garbled terminal from crashed/forced-exit sessions
+    stty sane 2>/dev/null || true
+    tput reset 2>/dev/null || true
+    tput cnorm 2>/dev/null || true  # Restore cursor
+}
+
+# Set up trap to clean terminal on any exit
+trap cleanup_terminal EXIT INT TERM HUP
+
 # Configuration
-VERSION="0.1.0"
+VERSION="0.4.2"
 USER="${USER:-$(whoami)}"
 SESSION_DIR="${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-${USER}"
 SOCKET_PREFIX="nvim-session"
 SSH_CONTROL_PREFIX="ssh-control"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nvim-screen"
+
+# Remote invocations must not rely on the login shell's PATH: non-interactive
+# SSH commands often miss ~/.local/bin, where nvim-screen installs itself.
+REMOTE_PATH='PATH="$HOME/.local/bin:$PATH"'
+
+# Lua one-liner that detaches every attached UI client and returns the count.
+DETACH_UIS_LUA='luaeval("(function() local n=0 for _,ui in ipairs(vim.api.nvim_list_uis()) do if ui.chan and ui.chan>0 then pcall(vim.fn.chanclose,ui.chan) n=n+1 end end return n end)()")'
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -32,12 +56,15 @@ get_init_script() {
     fi
 }
 
+# Function to sanitize a hostname for use in filenames
+sanitize_host() {
+    echo "${1//[^a-zA-Z0-9._-]/_}"
+}
+
 # Function to get SSH control master socket path
 get_ssh_control_path() {
     local ssh_host="$1"
-    # Sanitize hostname for use in filename
-    local safe_host="${ssh_host//[^a-zA-Z0-9._-]/_}"
-    echo "$SESSION_DIR/${SSH_CONTROL_PREFIX}-${safe_host}.sock"
+    echo "$SESSION_DIR/${SSH_CONTROL_PREFIX}-$(sanitize_host "$ssh_host").sock"
 }
 
 # Function to get hostname from SSH control socket path
@@ -50,28 +77,28 @@ get_host_from_control_path() {
     echo "$safe_host"
 }
 
-# Function to get all active SSH hosts
+# Function to get all active SSH hosts, one per line
 get_active_ssh_hosts() {
-    local hosts=()
+    local control_socket host
     for control_socket in "$SESSION_DIR"/${SSH_CONTROL_PREFIX}-*.sock; do
         if [[ -S "$control_socket" ]]; then
-            local host
             host=$(get_host_from_control_path "$control_socket")
             if check_ssh_control_master "$control_socket" 2>/dev/null; then
-                hosts+=("$host")
+                echo "$host"
             fi
         fi
     done
-    printf '%s\n' "${hosts[@]}"
 }
 
 # Function to find which remote host has a session
 find_remote_session() {
     local session_name="$1"
-    local hosts
-    mapfile -t hosts < <(get_active_ssh_hosts)
+    local hosts=() host
+    while IFS= read -r host; do
+        hosts+=("$host")
+    done < <(get_active_ssh_hosts)
 
-    for host in "${hosts[@]}"; do
+    for host in ${hosts[@]+"${hosts[@]}"}; do
         # Check if session exists on this host
         if ssh_exec "$host" "[ -S \"\${XDG_RUNTIME_DIR:-/tmp}/nvim-sessions-\$USER/nvim-session-$session_name.sock\" ]" 2>/dev/null; then
             echo "$host"
@@ -87,7 +114,8 @@ check_ssh_control_master() {
     local control_path="$1"
     # Hostname is not actually needed - the socket contains the connection info
     # Using a dummy value since SSH ignores it when using control master
-    ssh -O check -S "$control_path" dummy 2>&1 | grep -q "Master running"
+    # Use timeout to prevent hanging - if check takes more than 2 seconds, assume failed
+    timeout 2 ssh -O check -S "$control_path" dummy 2>&1 | grep -q "Master running"
     return $?
 }
 
@@ -101,6 +129,9 @@ establish_ssh_control_master() {
     if [[ -S "$control_path" ]] && check_ssh_control_master "$control_path"; then
         return 0
     fi
+
+    # A dead control socket would make ssh refuse to create a new master
+    rm -f "$control_path"
 
     # Establish new control master in background
     ssh -fNM -S "$control_path" \
@@ -124,17 +155,26 @@ establish_ssh_control_master() {
     fi
 }
 
-# Function to close SSH control master
-close_ssh_control_master() {
-    local ssh_host="$1"
-    local control_path
-    control_path=$(get_ssh_control_path "$ssh_host")
+# Function to terminate the master process behind a control socket.
+# 'ssh -O exit' alone is not enough: some OpenSSH versions acknowledge the
+# request but leave the master (and any listeners it holds) running.
+terminate_ssh_master() {
+    local control_path="$1"
+    local master_pid
 
-    if [[ -S "$control_path" ]]; then
-        # Hostname not needed - socket contains connection info
-        ssh -O exit -S "$control_path" dummy &>/dev/null
-        rm -f "$control_path"
+    master_pid=$(ssh -O check -S "$control_path" dummy 2>&1 \
+        | grep -o 'pid=[0-9]*' | cut -d= -f2 || true)
+    ssh -O exit -S "$control_path" dummy &>/dev/null || true
+
+    if [[ "$master_pid" =~ ^[0-9]+$ ]]; then
+        sleep 0.2
+        if kill -0 "$master_pid" 2>/dev/null; then
+            kill "$master_pid" 2>/dev/null || true
+            sleep 0.2
+            kill -0 "$master_pid" 2>/dev/null && kill -9 "$master_pid" 2>/dev/null
+        fi
     fi
+    rm -f "$control_path"
 }
 
 # Function to execute command via SSH using control master
@@ -149,14 +189,112 @@ ssh_exec() {
     ssh -S "$control_path" dummy "$@"
 }
 
-# Function to check if nvim-screen is installed on remote
-check_remote_nvim_screen() {
+# Function to run nvim-screen on a remote host
+remote_screen() {
+    local ssh_host="$1"
+    shift
+    ssh_exec "$ssh_host" "$REMOTE_PATH nvim-screen $*"
+}
+
+# Function to install nvim-screen (this script + config) on a remote host
+bootstrap_remote() {
+    local ssh_host="$1"
+    local self="${BASH_SOURCE[0]}"
+
+    if ! ssh_exec "$ssh_host" "$REMOTE_PATH command -v nvim" &>/dev/null; then
+        echo -e "${RED}Error: nvim not found on $ssh_host.${NC}"
+        echo "Run '$(basename "$0") -s $ssh_host -sync' to install Neovim there."
+        return 1
+    fi
+
+    echo "Installing nvim-screen on $ssh_host..."
+    ssh_exec "$ssh_host" 'mkdir -p "$HOME/.local/bin" "${XDG_CONFIG_HOME:-$HOME/.config}/nvim-screen"'
+    ssh_exec "$ssh_host" 'cat > "$HOME/.local/bin/nvim-screen" && chmod +x "$HOME/.local/bin/nvim-screen"' < "$self"
+
+    local init_script
+    init_script=$(get_init_script)
+    if [[ -n "$init_script" ]]; then
+        ssh_exec "$ssh_host" 'cat > "${XDG_CONFIG_HOME:-$HOME/.config}/nvim-screen/init.lua"' < "$init_script"
+    fi
+
+    echo -e "${GREEN}nvim-screen installed on $ssh_host${NC}"
+}
+
+# Function to install Neovim itself on a remote host (official stable
+# build into ~/.local, no root required)
+install_remote_nvim() {
+    local ssh_host="$1"
+    local os arch asset
+    os=$(ssh_exec "$ssh_host" 'uname -s' 2>/dev/null)
+    arch=$(ssh_exec "$ssh_host" 'uname -m' 2>/dev/null)
+
+    case "$os-$arch" in
+        Linux-x86_64)           asset="nvim-linux-x86_64" ;;
+        Linux-aarch64|Linux-arm64) asset="nvim-linux-arm64" ;;
+        Darwin-x86_64)          asset="nvim-macos-x86_64" ;;
+        Darwin-arm64)           asset="nvim-macos-arm64" ;;
+        *)
+            echo -e "${RED}Error: No prebuilt Neovim for $os/$arch. Install nvim on $ssh_host manually.${NC}"
+            return 1
+            ;;
+    esac
+
+    # NVIM_SCREEN_NVIM_URL overrides the download source (mirrors, air-gapped)
+    local url="${NVIM_SCREEN_NVIM_URL:-https://github.com/neovim/neovim/releases/download/stable/${asset}.tar.gz}"
+
+    echo "Installing Neovim (stable, $asset) on $ssh_host..."
+    if ! ssh_exec "$ssh_host" "
+        set -e
+        url='$url'
+        # BSD mktemp rejects templates with a suffix after the X's; tar
+        # doesn't need the .tar.gz extension anyway
+        tmp=\$(mktemp \"\${TMPDIR:-/tmp}/nvim-stable.XXXXXX\")
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL \"\$url\" -o \"\$tmp\"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -qO \"\$tmp\" \"\$url\"
+        else
+            echo 'Error: neither curl nor wget available on remote' >&2
+            exit 1
+        fi
+        mkdir -p \"\$HOME/.local/opt\" \"\$HOME/.local/bin\"
+        rm -rf \"\$HOME/.local/opt/${asset}\"
+        tar -xzf \"\$tmp\" -C \"\$HOME/.local/opt\"
+        rm -f \"\$tmp\"
+        ln -sf \"\$HOME/.local/opt/${asset}/bin/nvim\" \"\$HOME/.local/bin/nvim\"
+    "; then
+        echo -e "${RED}Failed to install Neovim on $ssh_host${NC}"
+        return 1
+    fi
+
+    local nvim_version
+    nvim_version=$(ssh_exec "$ssh_host" "$REMOTE_PATH nvim --version" 2>/dev/null | head -1 || true)
+    if [[ -z "$nvim_version" ]]; then
+        echo -e "${RED}Neovim installed but not runnable on $ssh_host${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}Installed $nvim_version on $ssh_host${NC}"
+}
+
+# Function to sync nvim-screen and the local Neovim config to a remote host,
+# installing Neovim itself if the remote doesn't have it
+sync_remote() {
     local ssh_host="$1"
 
-    if ssh_exec "$ssh_host" "command -v nvim-screen" &>/dev/null; then
-        return 0
+    if ! ssh_exec "$ssh_host" "$REMOTE_PATH command -v nvim" &>/dev/null; then
+        install_remote_nvim "$ssh_host" || return 1
+    fi
+
+    bootstrap_remote "$ssh_host" || return 1
+
+    local config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+    if [[ -d "$config_home/nvim" ]]; then
+        echo "Syncing Neovim config to $ssh_host..."
+        tar -C "$config_home" -czf - nvim | ssh_exec "$ssh_host" \
+            'mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}" && tar -C "${XDG_CONFIG_HOME:-$HOME/.config}" -xzf -'
+        echo -e "${GREEN}Neovim config synced. Plugins are installed by your plugin manager on first run.${NC}"
     else
-        return 1
+        echo "No local Neovim config at $config_home/nvim, skipping config sync."
     fi
 }
 
@@ -190,18 +328,13 @@ check_socket_health() {
 # Function to list active sessions
 list_sessions() {
     local ssh_host="$1"
-    local sessions=()
     local has_sessions=false
 
     if [[ -n "$ssh_host" ]]; then
         # List remote sessions (when -s flag is used)
         echo "Active Neovim sessions on $ssh_host:"
         echo
-
-        # Execute list command on remote host
-        local remote_output
-        remote_output=$(ssh_exec "$ssh_host" "nvim-screen -ls" 2>&1)
-        echo "$remote_output"
+        remote_screen "$ssh_host" "-ls" 2>&1
         return
     fi
 
@@ -227,10 +360,12 @@ list_sessions() {
     done
 
     # List sessions on all active remote hosts
-    local hosts
-    mapfile -t hosts < <(get_active_ssh_hosts)
+    local hosts=() host
+    while IFS= read -r host; do
+        hosts+=("$host")
+    done < <(get_active_ssh_hosts)
 
-    for host in "${hosts[@]}"; do
+    for host in ${hosts[@]+"${hosts[@]}"}; do
         if [[ -n "$host" ]]; then
             # Get remote sessions
             local remote_sessions
@@ -262,14 +397,55 @@ list_sessions() {
     echo
 }
 
+# Function to attach a UI client to a session and report how it ended
+run_client() {
+    local session_name="$1"
+    local socket_path
+    socket_path=$(get_socket_path "$session_name")
+
+    # Returns when this client detaches or the session ends
+    nvim --server "$socket_path" --remote-ui || true
+
+    if [[ -S "$socket_path" ]] && check_socket_health "$socket_path"; then
+        echo "[detached from $session_name]"
+    else
+        echo "[session $session_name ended]"
+    fi
+}
+
 # Function to start a new session
 start_session() {
     local session_name="$1"
     local ssh_host="$2"
-    shift 2
-    local nvim_args=("$@")
+    local workdir="$3"
+    shift 3
+    # ${1+"$@"}: bash < 4.4 errors on "$@" under 'set -u' when there are
+    # no positional parameters
+    local nvim_args=(${1+"$@"})
     local socket_path
     socket_path=$(get_socket_path "$session_name")
+
+    if [[ -n "$ssh_host" ]]; then
+        # Start remote session via SSH
+        local remote_cmd="$REMOTE_PATH nvim-screen -S '$session_name'"
+        if [[ -n "$workdir" ]]; then
+            printf -v remote_cmd '%s -c %q' "$remote_cmd" "$workdir"
+        fi
+        # Build nvim args string for remote execution
+        if [[ ${#nvim_args[@]} -gt 0 ]]; then
+            # Properly quote arguments for remote execution
+            local nvim_args_str
+            printf -v nvim_args_str ' -- %q' "${nvim_args[@]}"
+            remote_cmd+="$nvim_args_str"
+        fi
+
+        echo "Starting remote session '$session_name' on $ssh_host..."
+
+        # Start remote session via SSH with pseudo-terminal
+        # This will execute nvim-screen on the remote host and attach to it
+        ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy "$remote_cmd"
+        exit $?
+    fi
 
     if [[ -S "$socket_path" ]]; then
         echo -e "${YELLOW}Session '$session_name' already exists.${NC}"
@@ -277,36 +453,37 @@ start_session() {
         exit 1
     fi
 
-    if [[ -n "$ssh_host" ]]; then
-        # Start remote session via SSH
-        # Build nvim args string for remote execution
-        local nvim_args_str=""
-        if [[ ${#nvim_args[@]} -gt 0 ]]; then
-            # Properly quote arguments for remote execution
-            printf -v nvim_args_str ' -- %q' "${nvim_args[@]}"
-        fi
+    # Local session: run the server headless, detached from this terminal,
+    # so it survives client exits, terminal crashes, and SSH drops. The
+    # terminal then attaches to it as a regular client.
+    local init_script
+    init_script=$(get_init_script)
 
-        echo "Starting remote session '$session_name' on $ssh_host..."
-
-        # Start remote session via SSH with pseudo-terminal
-        # This will execute nvim-screen on the remote host and attach to it
-        exec ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
-            "nvim-screen -S '$session_name'$nvim_args_str"
-    else
-        # Local session - original behavior
-        # Get the init script to source
-        local init_script
-        init_script=$(get_init_script)
-
-        # Start nvim with server listening on socket
-        if [[ -n "$init_script" ]]; then
-            # Source the init script after nvim's standard initialization
-            exec nvim --listen "$socket_path" -S "$init_script" "${nvim_args[@]}"
-        else
-            # No init script, just start normally
-            exec nvim --listen "$socket_path" "${nvim_args[@]}"
-        fi
+    local server_cmd=(nvim --headless --listen "$socket_path")
+    if [[ -n "$init_script" ]]; then
+        server_cmd+=(-S "$init_script")
     fi
+    server_cmd+=(${nvim_args[@]+"${nvim_args[@]}"})
+
+    if command -v setsid &>/dev/null; then
+        NVIM_SCREEN_SESSION="$session_name" setsid "${server_cmd[@]}" </dev/null &>/dev/null &
+    else
+        NVIM_SCREEN_SESSION="$session_name" nohup "${server_cmd[@]}" </dev/null &>/dev/null &
+    fi
+
+    # Wait for the server socket to appear
+    local i
+    for ((i = 0; i < 50; i++)); do
+        [[ -S "$socket_path" ]] && break
+        sleep 0.1
+    done
+
+    if [[ ! -S "$socket_path" ]] || ! check_socket_health "$socket_path"; then
+        echo -e "${RED}Failed to start session '$session_name'${NC}"
+        exit 1
+    fi
+
+    run_client "$session_name"
 }
 
 # Function to attach to existing session
@@ -335,8 +512,9 @@ attach_session() {
         fi
 
         # Attach to remote session via SSH with pseudo-terminal
-        exec ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
-            "nvim-screen -r '$base_session_name'"
+        ssh -t -S "$(get_ssh_control_path "$ssh_host")" dummy \
+            "$REMOTE_PATH nvim-screen -r '$base_session_name'"
+        exit $?
     fi
 
     # Not in host:session format, check locally first
@@ -345,7 +523,8 @@ attach_session() {
 
     if [[ -S "$socket_path" ]]; then
         # Local session - attach to it
-        exec nvim --server "$socket_path" --remote-ui
+        run_client "$session_name"
+        return
     fi
 
     # Not found anywhere
@@ -355,7 +534,7 @@ attach_session() {
     exit 1
 }
 
-# Function to detach from a session (close all UI clients)
+# Function to detach all clients from a session
 detach_session() {
     local session_name="$1"
     local ssh_host=""
@@ -373,7 +552,7 @@ detach_session() {
             exit 1
         fi
 
-        ssh_exec "$ssh_host" "nvim-screen -d '$base_session_name'"
+        remote_screen "$ssh_host" "-d '$base_session_name'"
         return $?
     fi
 
@@ -382,37 +561,14 @@ detach_session() {
     socket_path=$(get_socket_path "$session_name")
 
     if [[ -S "$socket_path" ]]; then
-        # Get list of UI channel IDs to close (socket-based UIs only, not the stdio server)
-        local channel_ids
-        channel_ids=$(nvim --headless --server "$socket_path" --remote-expr "$(cat <<'LUA'
-execute("lua for _, c in ipairs(vim.api.nvim_list_chans()) do
-  if c.stream == \"socket\" and c.client and c.client.type == \"ui\" then
-    print(c.id)
-  end
-end")
-LUA
-        )" 2>&1)
+        local detached
+        detached=$(nvim --headless --server "$socket_path" \
+            --remote-expr "$DETACH_UIS_LUA" 2>/dev/null || true)
 
-        if [[ -z "$channel_ids" ]]; then
-            echo -e "${YELLOW}No UI clients to detach from session '$session_name'${NC}"
-            return
-        fi
-
-        # Close each UI channel
-        local closed=0
-        while IFS= read -r chan_id; do
-            if [[ -n "$chan_id" && "$chan_id" =~ ^[0-9]+$ ]]; then
-                if nvim --headless --server "$socket_path" --remote-expr \
-                    "luaeval(\"vim.fn.chanclose($chan_id)\")" &>/dev/null; then
-                    closed=$((closed + 1))
-                fi
-            fi
-        done <<< "$channel_ids"
-
-        if [[ $closed -gt 0 ]]; then
-            echo -e "${GREEN}Detached $closed UI client(s) from session '$session_name'${NC}"
+        if [[ "$detached" =~ ^[0-9]+$ ]] && [[ "$detached" -gt 0 ]]; then
+            echo -e "${GREEN}Detached $detached client(s) from session '$session_name'${NC}"
         else
-            echo -e "${RED}Failed to detach UI clients${NC}"
+            echo -e "${YELLOW}No clients attached to session '$session_name'${NC}"
         fi
         return
     fi
@@ -424,12 +580,60 @@ LUA
         # For remote session, execute detach on remote host
         echo "Detaching from remote session '$session_name' on $ssh_host..."
 
-        ssh_exec "$ssh_host" "nvim-screen -d '$session_name'"
+        remote_screen "$ssh_host" "-d '$session_name'"
         return $?
     fi
 
     echo -e "${RED}Error: Session '$session_name' not found.${NC}"
     exit 1
+}
+
+# Function to terminate a session
+kill_session() {
+    local session_name="$1"
+    local ssh_host=""
+    local base_session_name="$session_name"
+
+    # Check if session name contains host prefix (host:session format)
+    if [[ "$session_name" =~ ^([^:]+):(.+)$ ]]; then
+        ssh_host="${BASH_REMATCH[1]}"
+        base_session_name="${BASH_REMATCH[2]}"
+
+        if ! establish_ssh_control_master "$ssh_host"; then
+            echo -e "${RED}Failed to establish SSH connection${NC}"
+            exit 1
+        fi
+
+        remote_screen "$ssh_host" "-k '$base_session_name'"
+        return $?
+    fi
+
+    # Not in host:session format, check locally
+    local socket_path
+    socket_path=$(get_socket_path "$session_name")
+
+    if [[ ! -S "$socket_path" ]]; then
+        # Check if this is a remote session
+        ssh_host=$(find_remote_session "$session_name" || true)
+        if [[ -n "$ssh_host" ]]; then
+            remote_screen "$ssh_host" "-k '$session_name'"
+            return $?
+        fi
+
+        echo -e "${RED}Error: Session '$session_name' not found.${NC}"
+        exit 1
+    fi
+
+    local pid
+    pid=$(nvim --headless --server "$socket_path" --remote-expr 'getpid()' 2>/dev/null || true)
+
+    if [[ "$pid" =~ ^[0-9]+$ ]]; then
+        kill "$pid" 2>/dev/null || true
+        echo -e "${GREEN}Session '$session_name' terminated.${NC}"
+    else
+        echo -e "${YELLOW}Session '$session_name' unresponsive, removing stale socket.${NC}"
+    fi
+    rm -f "$socket_path"
 }
 
 # Function to clean up stale sockets
@@ -454,7 +658,7 @@ cleanup_stale_sockets() {
             # Check if control master is still active
             if ! check_ssh_control_master "$control_socket" 2>/dev/null; then
                 echo "Removing stale SSH control socket: ${control_socket##*/}"
-                rm -f "$control_socket"
+                terminate_ssh_master "$control_socket"
                 cleaned=$((cleaned + 1))
             fi
         fi
@@ -477,30 +681,38 @@ show_usage() {
     cat << EOF
 Neovim Session Manager - GNU screen-like interface for Neovim
 
-Usage: $(basename $0) [options] [command] [-- nvim_args...]
+Usage: $(basename "$0") [options] [command] [-- nvim_args...]
 
 Options:
-  -s <host>      Connect to remote host via SSH
-  -S <name>      Start a new session with the specified name
-  -ls, -list     List all active sessions (local and remote)
-  -r [name]      Attach to session (if name not specified, attach to last or prompt)
-  -d <name>      Detach/terminate the specified session
-  -wipe          Clean up stale/dead sessions
-  -v, --version  Show version information
-  -h, --help     Show this help message
-  --             Pass all following arguments to nvim
+  -s <host>          Connect to remote host via SSH (auto-installs nvim-screen there)
+  -S <name>          Start a new session with the specified name
+  -c <dir>           Working directory for the new session (local or remote)
+  -ls, -list         List all active sessions (local and remote)
+  -r [name]          Attach to session (if name not specified, attach to last or prompt)
+  -d <name>          Detach all clients from the specified session
+  -k <name>          Kill (terminate) the specified session
+  -sync              Sync nvim-screen and your Neovim config to the remote,
+                     installing Neovim there if it's missing (with -s)
+  -wipe              Clean up stale/dead sessions
+  -v, --version      Show version information
+  -h, --help         Show this help message
+  --                 Pass all following arguments to nvim
 
 Examples:
-  $(basename $0) -S myproject                    # Start new session named 'myproject'
-  $(basename $0) -S myproject -- file.txt        # Start session and open file.txt
-  $(basename $0) -s user@host -S remote-proj     # Start session on remote host
-  $(basename $0) -s user@host -ls                # List sessions on remote host
-  $(basename $0) -- -O file1.txt file2.txt       # Start session with vertical split
-  $(basename $0) -S test -- -c 'set number'      # Start session with nvim command
+  $(basename "$0") -S myproject                    # Start new session named 'myproject'
+  $(basename "$0") -S myproject -- file.txt        # Start session and open file.txt
+  $(basename "$0") -s user@host -S remote-proj     # Start session on remote host
+  $(basename "$0") -s user@host -c ~/work/proj     # Remote session in ~/work/proj
+  $(basename "$0") -s user@host -ls                # List sessions on remote host
+  $(basename "$0") -s user@host -sync              # Push nvim + config + nvim-screen to host
+  $(basename "$0") -r host:session                 # Attach to remote session
+  $(basename "$0") -- -O file1.txt file2.txt       # Start session with vertical split
+  $(basename "$0") -S test -- -c 'set number'      # Start session with nvim command
 
 Inside Neovim:
-  :detach                  Detach from session (keeps it running)
-  Ctrl-\\ Ctrl-N           Alternative way to detach
+  :q (and :qa, ZZ, ...)    Detach when the quit would end the session
+  :Detach                  Detach all clients (session keeps running)
+  :Quit                    Actually end the session
 
 Session sockets are stored in: $SESSION_DIR
 EOF
@@ -508,9 +720,11 @@ EOF
 
 # Main script logic
 main() {
-    local action="start"
+    local action=""
     local session_name=""
     local ssh_host=""
+    local workdir=""
+    local do_sync=false
     local nvim_args=()
 
     # Parse command line arguments
@@ -560,6 +774,31 @@ main() {
                     exit 1
                 fi
                 ;;
+            -k|-kill)
+                action="kill"
+                shift
+                if [[ $# -gt 0 ]]; then
+                    session_name="$1"
+                    shift
+                else
+                    echo -e "${RED}Error: -k requires a session name${NC}"
+                    exit 1
+                fi
+                ;;
+            -c)
+                shift
+                if [[ $# -gt 0 ]]; then
+                    workdir="$1"
+                    shift
+                else
+                    echo -e "${RED}Error: -c requires a directory${NC}"
+                    exit 1
+                fi
+                ;;
+            -sync)
+                do_sync=true
+                shift
+                ;;
             -wipe)
                 action="wipe"
                 shift
@@ -575,7 +814,7 @@ main() {
             --)
                 # Everything after -- is passed to nvim
                 shift
-                nvim_args=("$@")
+                nvim_args=(${1+"$@"})
                 break
                 ;;
             *)
@@ -587,6 +826,31 @@ main() {
         esac
     done
 
+    # -sync only makes sense against a remote host
+    if [[ -z "$ssh_host" ]] && [[ "$do_sync" == true ]]; then
+        echo -e "${RED}Error: -sync requires -s <host>${NC}"
+        exit 1
+    fi
+
+    # Default action: start a session, unless the invocation was only about
+    # syncing the remote
+    if [[ -z "$action" ]]; then
+        if [[ "$do_sync" == true ]] && [[ ${#nvim_args[@]} -eq 0 ]]; then
+            action="none"
+        else
+            action="start"
+        fi
+    fi
+
+    # A local working directory applies right away; a remote one is passed
+    # along to the remote nvim-screen invocation in start_session
+    if [[ -n "$workdir" ]] && [[ -z "$ssh_host" ]]; then
+        if ! cd "$workdir" 2>/dev/null; then
+            echo -e "${RED}Error: Cannot change to directory '$workdir'${NC}"
+            exit 1
+        fi
+    fi
+
     # Handle SSH connection if specified
     if [[ -n "$ssh_host" ]]; then
         echo "Establishing SSH connection to $ssh_host..."
@@ -594,28 +858,40 @@ main() {
             exit 1
         fi
 
-        # Check if nvim-screen is installed on remote
-        if ! check_remote_nvim_screen "$ssh_host"; then
-            echo -e "${RED}Error: nvim-screen is not installed on $ssh_host${NC}"
-            echo
-            echo "Please install nvim-screen on the remote host first:"
-            echo "  ssh $ssh_host 'curl -fsSL https://raw.githubusercontent.com/tijoseymathew/nvim-screen/main/install.sh | bash'"
-            echo
-            close_ssh_control_master "$ssh_host"
-            exit 1
+        if [[ "$do_sync" == true ]]; then
+            sync_remote "$ssh_host" || exit 1
+        else
+            # Install nvim-screen on the remote if it's missing, and keep
+            # it in step with the local version
+            local remote_version
+            remote_version=$(remote_screen "$ssh_host" "-v" 2>/dev/null | awk '{print $NF}' || true)
+            if [[ "$remote_version" != "$VERSION" ]]; then
+                if [[ -z "$remote_version" ]]; then
+                    echo -e "${YELLOW}nvim-screen not found on $ssh_host${NC}"
+                else
+                    echo -e "${YELLOW}Updating nvim-screen on $ssh_host ($remote_version -> $VERSION)${NC}"
+                fi
+                bootstrap_remote "$ssh_host" || exit 1
+            fi
         fi
     fi
 
     # Execute action
     case "$action" in
+        none)
+            ;;
         list)
             list_sessions "$ssh_host"
             ;;
         start)
             if [[ -z "$session_name" ]]; then
-                session_name=$(generate_session_name)
+                if [[ -n "$ssh_host" ]] && [[ -n "$workdir" ]]; then
+                    session_name=$(basename "$workdir")
+                else
+                    session_name=$(generate_session_name)
+                fi
             fi
-            start_session "$session_name" "$ssh_host" "${nvim_args[@]}"
+            start_session "$session_name" "$ssh_host" "$workdir" ${nvim_args[@]+"${nvim_args[@]}"}
             ;;
         attach)
             if [[ -z "$session_name" ]]; then
@@ -656,6 +932,9 @@ main() {
         detach)
             detach_session "$session_name"
             ;;
+        kill)
+            kill_session "$session_name"
+            ;;
         wipe)
             cleanup_stale_sockets
             echo "Stale sessions cleaned up."
@@ -663,4 +942,4 @@ main() {
     esac
 }
 
-main "$@"
+main ${1+"$@"}
