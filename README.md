@@ -81,7 +81,7 @@ nvim-screen there automatically (see below).
 Inside Neovim:
 - `Ctrl+a` `d` — detach; the session keeps running (GNU screen's binding)
 - `Ctrl+a` `a` — send a literal `Ctrl+a`
-- `:Detach` — the same thing from the command line
+- `:detach` — the same thing from the command line (built into Neovim)
 - `:q`, `:qa`, `:wq`, `ZZ`, ... — ordinary Neovim quits; the last one ends the
   session, exactly as they would outside nvim-screen
 
@@ -106,12 +106,13 @@ session and everything running in it stay.
 - `Ctrl+a` `d` — detach
 - `Ctrl+a` `a` — send a literal `Ctrl+a` (screen's escape convention), so the
   increment command is still one keystroke away
-- `:Detach` — same action, for when your hands are already on `:`
+- `:detach` — same action, for when your hands are already on `:` (Neovim's
+  own built-in command)
 - bare `Ctrl+a` is left unmapped, so after `timeoutlen` it still increments
   the number under the cursor
-- `NVIM_SCREEN_PREFIX` changes the prefix (Neovim key notation, e.g.
-  `NVIM_SCREEN_PREFIX='<C-b>'`); nvim-screen passes it to the session, local
-  or remote
+- change the `prefix` variable at the top of `init.lua` to use a different key
+  (Neovim key notation, e.g. `<C-b>`); since the config travels to remote
+  hosts with nvim-screen, the change applies there too
 
 Quit commands are not intercepted: `:q`, `:qa`, `:wq` and `ZZ` mean what they
 always mean, and the last one ends the session — as does

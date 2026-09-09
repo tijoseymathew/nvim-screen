@@ -6,46 +6,19 @@
 --
 --   <prefix> d              detach; the session keeps running
 --   <prefix> a              send the prefix key itself (screen's convention)
---   :Detach                 same as <prefix> d, from the command line
+--   :detach                 same as <prefix> d, from the command line (built into Neovim)
 --   :q, :qa, :wq, ZZ, ...   ordinary Neovim quits - the last one ends the session
 --   nvim-screen -k <name>   end the session from the shell
 --
--- The prefix defaults to Ctrl+a and is set by the nvim-screen script through
--- $NVIM_SCREEN_PREFIX, so it is configured in one place for both. Bare
--- <prefix> is deliberately left unmapped: after 'timeoutlen' it falls through
--- to whatever it normally does (Ctrl+a increments the number under the
+-- Change this to customize the prefix (Neovim key notation). Bare <prefix> is
+-- deliberately left unmapped: after 'timeoutlen' it falls through to
+-- whatever it normally does (Ctrl+a increments the number under the
 -- cursor), and <prefix> a does the same thing without the wait.
+local prefix = "<C-a>"
 
 local augroup = vim.api.nvim_create_augroup("NvimScreen", { clear = true })
 
-local prefix = vim.env.NVIM_SCREEN_PREFIX
-if prefix == nil or prefix == "" then
-	prefix = "<C-a>"
-end
-
--- Detach every attached UI client; the session keeps running.
-local function detach_uis()
-	local closed = 0
-	for _, ui in ipairs(vim.api.nvim_list_uis()) do
-		if ui.chan and ui.chan > 0 then
-			pcall(vim.fn.chanclose, ui.chan)
-			closed = closed + 1
-		end
-	end
-	return closed
-end
-
-local function detach()
-	if detach_uis() == 0 then
-		vim.notify("nvim-screen: no attached clients", vim.log.levels.WARN)
-	end
-end
-
-vim.api.nvim_create_user_command("Detach", detach, {
-	desc = "nvim-screen: detach all clients, keep session running",
-})
-
-vim.keymap.set("n", prefix .. "d", detach, {
+vim.keymap.set("n", prefix .. "d", "<Cmd>detach<CR>", {
 	desc = "nvim-screen: detach (session keeps running)",
 })
 
@@ -64,7 +37,7 @@ vim.api.nvim_create_autocmd("UIEnter", {
 		local name = vim.env.NVIM_SCREEN_SESSION
 		vim.defer_fn(function()
 			vim.notify(
-				("nvim-screen%s: %s d (or :Detach) detaches, :qa ends the session"):format(
+				("nvim-screen%s: %s d (or :detach) detaches, :qa ends the session"):format(
 					name and (" [" .. name .. "]") or "",
 					prefix_label
 				),
