@@ -29,6 +29,24 @@ This installs:
 - Default config to `~/.config/nvim-screen/init.lua`
 - Bash completions to `~/.local/share/bash-completion/completions/`
 
+**Installing a different branch or fork:**
+
+The installer reads `GITHUB_BRANCH` (default `main`) and `GITHUB_REPO`
+(default `tijoseymathew/nvim-screen`) from the environment:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tijoseymathew/nvim-screen/main/install.sh \
+    | GITHUB_BRANCH=my-feature bash
+```
+
+Note where the variable goes: `GITHUB_BRANCH=x curl ... | bash` would set it
+for `curl`, not for the shell running the installer. When running a local
+copy, the usual prefix works: `GITHUB_BRANCH=my-feature ./install.sh`.
+
+Set `NVIM_SCREEN_OVERWRITE_CONFIG=1` to replace an existing
+`init.lua` without being prompted (the installer keeps it by default when
+there is no terminal to ask on).
+
 **Manual installation:**
 
 ```bash
@@ -36,7 +54,7 @@ This installs:
 curl -fsSL https://raw.githubusercontent.com/tijoseymathew/nvim-screen/main/nvim-screen -o ~/.local/bin/nvim-screen
 chmod +x ~/.local/bin/nvim-screen
 
-# Optionally install default config for quit interception
+# Optionally install default config for the screen-style detach binding
 mkdir -p ~/.config/nvim-screen
 curl -fsSL https://raw.githubusercontent.com/tijoseymathew/nvim-screen/main/init.lua -o ~/.config/nvim-screen/init.lua
 ```
@@ -57,13 +75,15 @@ nvim-screen there automatically (see below).
 | `nvim-screen -c <dir>` | Start session in a working directory (local or remote) |
 | `nvim-screen -s <host> ...` | Run any of the above on a remote host |
 | `nvim-screen -s <host> -sync` | Push Neovim, your config, and nvim-screen to host |
+| `nvim-screen -fix` | Restore a terminal left garbled by a dead session |
 | `nvim-screen -h` | Show help |
 
 Inside Neovim:
-- `:q`, `:qa`, `:wq`, `ZZ`, ... — detach when the quit would end the session;
-  otherwise they close the window as usual
-- `:Detach` — detach all clients explicitly
-- `:Quit` — actually end the session
+- `Ctrl+a` `d` — detach; the session keeps running (GNU screen's binding)
+- `Ctrl+a` `a` — send a literal `Ctrl+a`
+- `:Detach` — the same thing from the command line
+- `:q`, `:qa`, `:wq`, `ZZ`, ... — ordinary Neovim quits; the last one ends the
+  session, exactly as they would outside nvim-screen
 
 ## How it works
 
@@ -77,16 +97,25 @@ Uses Neovim's native client-server features:
 
 Single bash script. No dependencies beyond standard Unix tools.
 
-### Quit interception
+### Detaching
 
-The default config (`~/.config/nvim-screen/init.lua`) rewrites quit commands
-on the command line before they execute (`QuitPre`/`ExitPre` autocommands
-cannot abort an exit, so rewriting is the only reliable interception point):
+The default config (`~/.config/nvim-screen/init.lua`) adds a prefix key in
+GNU screen's style. `Ctrl+a` then `d` detaches: the client goes away, the
+session and everything running in it stay.
 
-- A quit that only closes a window or tab runs unchanged
-- A quit that would end the session (`:q` on the last window, `:qa`, `ZZ`, ...)
-  writes files if asked (`:wq`, `:x`) and then **detaches** instead
-- `:Quit` (or `nvim-screen -k <name>` from the shell) ends the session for real
+- `Ctrl+a` `d` — detach
+- `Ctrl+a` `a` — send a literal `Ctrl+a` (screen's escape convention), so the
+  increment command is still one keystroke away
+- `:Detach` — same action, for when your hands are already on `:`
+- bare `Ctrl+a` is left unmapped, so after `timeoutlen` it still increments
+  the number under the cursor
+- `NVIM_SCREEN_PREFIX` changes the prefix (Neovim key notation, e.g.
+  `NVIM_SCREEN_PREFIX='<C-b>'`); nvim-screen passes it to the session, local
+  or remote
+
+Quit commands are not intercepted: `:q`, `:qa`, `:wq` and `ZZ` mean what they
+always mean, and the last one ends the session — as does
+`nvim-screen -k <name>` from the shell.
 
 To disable, delete the config file. The init script is pure Lua with full
 access to Neovim's API — add any custom session initialization you want.
@@ -103,8 +132,9 @@ nvim-screen -r user@host:myproj         # attach to a remote session
 nvim-screen -k user@host:myproj         # kill a remote session
 ```
 
-- Connections are multiplexed over a persistent SSH control master, so
-  repeated commands don't re-authenticate
+- Connections are plain `ssh`. Whether repeated commands re-authenticate is
+  decided by **your** `~/.ssh/config` — nvim-screen no longer runs a control
+  master of its own (see [Connection multiplexing](#connection-multiplexing))
 - If nvim-screen isn't installed on the host, it is **installed automatically**
   on first connect (the script and your nvim-screen config are pushed over the
   existing SSH connection — the remote only needs Neovim 0.9+), and it is
@@ -115,7 +145,85 @@ nvim-screen -k user@host:myproj         # kill a remote session
   stable build into `~/.local` there, no root required
 - `-c <dir>` sets the session's working directory; when a control master for
   the host is already up, bash completion completes **remote** directories
-- `nvim-screen -ls` lists local sessions and sessions on every connected host
+- `nvim-screen -ls` lists local sessions and sessions on every host you have
+  connected to in this boot; each host is asked non-interactively and with a
+  time limit, so an unreachable one is skipped rather than hanging the listing
+
+### Connection multiplexing
+
+nvim-screen used to start and manage an SSH control master per host. It no
+longer does: multiplexing is a property of the connection, not of this tool,
+and configuring it yourself means `scp`, `rsync`, `git` and everything else
+benefit from the same connection reuse.
+
+Put this in `~/.ssh/config`:
+
+```
+Host *
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h:%p
+    ControlPersist 10m
+    ServerAliveInterval 15
+    ServerAliveCountMax 3
+```
+
+```bash
+mkdir -p ~/.ssh/sockets
+```
+
+Without it, nothing breaks — each remote command just authenticates on its
+own. With it, the first connection carries every one that follows, and
+`ServerAlive*` is what makes a dropped link get noticed in seconds rather
+than minutes. The installer prints the same snippet.
+
+### When the connection drops
+
+Your session lives on the host, not in the connection, so nothing is lost —
+but the terminal you were typing into has to come back. Two things make sure
+it does.
+
+**The dead link gets noticed.** Left alone, `ssh` sits in a TCP retransmit
+loop for minutes after the network goes away, and for all of those minutes
+your terminal is frozen inside Neovim's alternate screen with no way out.
+So the connection is supervised:
+
+- on a connection nvim-screen opens itself, `ServerAliveInterval`/
+  `ServerAliveCountMax` make it give up in about 45s
+- on a connection multiplexed over your control master, those are the
+  master's business, and a watchdog beside the attached session notices when
+  the master dies (or is alive but no longer carrying anything) and drops you
+  back to your shell
+- `Enter` `~` `.` — ssh's own escape — works at any time, and never waits
+
+**The terminal gets put back.** Raw mode, the alternate screen, mouse
+reporting, bracketed paste, focus reporting, the kitty keyboard protocol,
+`modifyOtherKeys`, the scrolling region, auto-wrap and the alternate
+character sets are all unwound on every exit path — clean detach, killed
+client, dropped link, or a signal to nvim-screen itself. Your terminal
+settings are restored to exactly what they were; the screen and scrollback
+are deliberately left alone (no `tput reset`, no RIS). The reset is written
+to `/dev/tty`, so it lands even when output was redirected.
+
+Reattaching evicts any client that is still attached: Neovim sizes the
+screen to the smallest attached UI, so a leftover client from a dropped
+connection is what makes a reattached session look mangled. Set
+`NVIM_SCREEN_SHARE=1` to attach alongside existing clients instead.
+
+Environment knobs: `NVIM_SCREEN_KEEPALIVE_INTERVAL` (15),
+`NVIM_SCREEN_KEEPALIVE_COUNT` (3), `NVIM_SCREEN_WATCHDOG` (1, set to 0 to
+disable), `NVIM_SCREEN_WATCHDOG_TICK` (3), `NVIM_SCREEN_DEEP_PROBE_EVERY`
+(10 ticks, 0 disables), `NVIM_SCREEN_SSH_DIRECT` (1 forces an unmultiplexed
+connection so this client handles escapes and keepalives itself).
+
+## Troubleshooting
+
+**Terminal prints garbage after a dropped SSH connection.** Run
+`nvim-screen -fix` in it. The keystrokes may echo as garbage, but they still
+reach the shell — press Enter and the command runs. This should not be
+needed for a session nvim-screen was supervising (see
+[When the connection drops](#when-the-connection-drops)); it is there for a
+terminal wrecked some other way — an older nvim-screen, a force-quit
+emulator, or a full-screen program that was not nvim-screen at all.
 
 ## Requirements
 
