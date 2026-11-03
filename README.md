@@ -122,6 +122,30 @@ access to Neovim's API — add any custom session initialization you want.
 `$NVIM_SCREEN_SESSION` holds the session name inside the server (useful for
 statuslines).
 
+### Running `nvim` in a session's terminal
+
+Typing `nvim file` in a `:terminal` inside a session opens the file **in the
+session** (in a new tab), not in a second Neovim nested in the terminal. The
+command waits until you close the file, as a nested nvim would, so `git commit`
+and other `$EDITOR` users work as well. `:q` closes the tab and returns you to
+the terminal.
+
+- Relative paths are resolved against the **terminal's** working directory,
+  not the session's, and the new tab is `:tcd`'d there
+- `+N` / `+cmd` arguments are supported; any other option (`-d`, `-R`,
+  `--headless`, `-` for stdin, ...) runs a real nested nvim, as does running
+  it without a terminal (from `:!`, pipes, scripts)
+- `NVIM_SCREEN_NESTED=1 nvim ...` forces a real nested nvim
+
+This works through an `nvim` wrapper that the default config puts first on the
+session's `$PATH` (its directory is in `$NVIM_SCREEN_BIN`). If your shell
+startup puts a directory containing the real `nvim` in front of it, such as
+`~/.local/bin` after `-sync`, add this to the end of your `~/.bashrc`:
+
+```bash
+[[ -n "$NVIM_SCREEN_BIN" ]] && PATH="$NVIM_SCREEN_BIN:$PATH"
+```
+
 ## Remote sessions
 
 ```bash
