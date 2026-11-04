@@ -76,12 +76,14 @@ nvim-screen there automatically (see below).
 | `nvim-screen -s <host> ...` | Run any of the above on a remote host |
 | `nvim-screen -s <host> -sync` | Push Neovim, your config, and nvim-screen to host |
 | `nvim-screen -fix` | Restore a terminal left garbled by a dead session |
+| `nvim-screen -snapshot` | Refresh the cached session list the in-session switcher reads |
 | `nvim-screen -h` | Show help |
 
 Inside Neovim:
 - `Ctrl+a` `d` — detach; the session keeps running (GNU screen's binding)
 - `Ctrl+a` `a` — send a literal `Ctrl+a`
 - `:Detach` — the same thing from the command line
+- `<leader>s` / `:Sessions` — pick another session and switch to it
 - `:q`, `:qa`, `:wq`, `ZZ`, ... — ordinary Neovim quits; the last one ends the
   session, exactly as they would outside nvim-screen
 
@@ -116,6 +118,44 @@ session and everything running in it stay.
 Quit commands are not intercepted: `:q`, `:qa`, `:wq` and `ZZ` mean what they
 always mean, and the last one ends the session — as does
 `nvim-screen -k <name>` from the shell.
+
+### Switching sessions
+
+`<leader>s` (or `:Sessions`) opens a picker over the same list `-ls` prints —
+every local session plus every session on every host you have connected to —
+and moves you to whichever one you choose, in one step. There is no
+intermediate "pick a host" stage: entries are already `host:session`.
+
+- switching between two sessions **on the machine you are already on** uses
+  Neovim's own `:connect`, which walks the UI across to the other server.
+  Nothing is torn down and nothing flickers
+- switching to a session on **another machine** cannot be a live `:connect` —
+  it does no tunneling — so the client lets go and the nvim-screen you
+  originally ran reattaches you over SSH. You see a brief flicker back through
+  the wrapper; your shell prompt does not come back, because that invocation
+  stays in charge until you detach or quit for real
+- if the reattach fails (host gone, session gone, needs a password nobody can
+  type), you get an error and your shell back. There is no silent fallback to
+  the session you left
+
+The picker is `vim.ui.select`, so a picker plugin you have configured is used
+automatically. `NVIM_SCREEN_SWITCH_KEY` rebinds the key (Neovim notation, e.g.
+`NVIM_SCREEN_SWITCH_KEY='<C-a>"'`); set it to an empty string to leave the key
+unbound and use `:Sessions` alone.
+
+**What the picker can see, and how fresh it is.** Sessions on the machine the
+picker is running on are enumerated on the spot, so they are always current.
+Everything else has to come from the machine that owns your SSH config: it
+sweeps hosts exactly as `-ls` does and hands the result over.
+
+- locally that sweep is a cache, refreshed in the background when you attach
+  and again whenever you open the picker, so attaching stays instant
+- for a session out on a remote host, the sweep runs before the hop and its
+  result is pushed across. That adds `-ls`-sized latency to a remote attach,
+  which was already paying for an SSH handshake — and it means the remote
+  picker's view of your other machines is frozen as of when that hop started.
+  A session you start on your laptop from a second terminal shows up there
+  only after you switch again
 
 To disable, delete the config file. The init script is pure Lua with full
 access to Neovim's API — add any custom session initialization you want.
